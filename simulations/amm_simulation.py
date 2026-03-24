@@ -1,5 +1,8 @@
 import random
 import numpy as np
+import matplotlib
+# Use non-interactive backend to avoid warnings
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 class Pool:
@@ -119,10 +122,10 @@ def simulate_random_trades(pool, num_trades, max_dx=50):
     return price_history
 
 
-# ---------- Plotting Functions ----------
+# ---------- Plotting Functions (save to files) ----------
 
-def plot_invariant_curve(pool):
-    """Plot the invariant curve y = k/x, with current point marked."""
+def plot_invariant_curve(pool, filename='invariant_curve.png'):
+    """Plot the invariant curve y = k/x, with current point marked. Saves to file."""
     x_vals = np.linspace(pool.x * 0.5, pool.x * 1.5, 100)
     y_vals = pool.k / x_vals
 
@@ -134,11 +137,13 @@ def plot_invariant_curve(pool):
     plt.title('Invariant Curve')
     plt.legend()
     plt.grid(True)
-    plt.show()
+    plt.savefig(filename, dpi=100, bbox_inches='tight')
+    plt.close()
+    print(f"Invariant curve plot saved to {filename}")
 
 
-def plot_slippage_curve(pool, max_dx=500, num_points=50):
-    """Plot average price and slippage percent vs trade size dx."""
+def plot_slippage_curve(pool, max_dx=500, num_points=50, filename='slippage_curve.png'):
+    """Plot average price and slippage percent vs trade size dx. Saves to file."""
     dx_vals = np.linspace(0.1, max_dx, num_points)
     avg_price_vals = [pool.average_price_for_swap_x_to_y(dx) for dx in dx_vals]
     slippage_vals = [pool.slippage_percent_x_to_y(dx) for dx in dx_vals]
@@ -157,18 +162,22 @@ def plot_slippage_curve(pool, max_dx=500, num_points=50):
     plt.title('Slippage and Average Price vs Trade Size')
     fig.legend(loc='upper right')
     plt.grid(True)
-    plt.show()
+    plt.savefig(filename, dpi=100, bbox_inches='tight')
+    plt.close()
+    print(f"Slippage curve plot saved to {filename}")
 
 
-def plot_price_evolution(price_history):
-    """Plot price over trade number."""
+def plot_price_evolution(price_history, filename='price_evolution.png'):
+    """Plot price over trade number. Saves to file."""
     plt.figure(figsize=(8, 6))
     plt.plot(range(len(price_history)), price_history, 'b-')
     plt.xlabel('Trade number')
     plt.ylabel('Price (y/x)')
     plt.title('Price Evolution')
     plt.grid(True)
-    plt.show()
+    plt.savefig(filename, dpi=100, bbox_inches='tight')
+    plt.close()
+    print(f"Price evolution plot saved to {filename}")
 
 
 # ---------- Main Demonstration ----------
@@ -210,14 +219,11 @@ if __name__ == "__main__":
     print(f"After remove: x={pool.x}, y={pool.y}, k={pool.k:.2f}, price={pool.price():.4f}")
 
     # ---------- Plotting Examples ----------
-    print("\nPlotting invariant curve...")
-    plot_invariant_curve(pool)
-
-    print("\nPlotting slippage curve...")
-    plot_slippage_curve(pool, max_dx=500)
-
-    print("\nPlotting price evolution from random trades...")
+    print("\nGenerating plots...")
+    plot_invariant_curve(pool, 'invariant_curve.png')
+    plot_slippage_curve(pool, max_dx=500, filename='slippage_curve.png')
     # Run a new simulation to get fresh price history
     fresh_pool = Pool(1000, 1000)
     price_hist_long = simulate_random_trades(fresh_pool, 50, max_dx=100)
-    plot_price_evolution(price_hist_long)
+    plot_price_evolution(price_hist_long, 'price_evolution.png')
+    print("\nAll plots saved. You can view them with any image viewer.")
