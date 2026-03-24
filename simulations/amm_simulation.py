@@ -38,6 +38,22 @@ class Pool:
         self.y = new_y
         return dx
 
+    def average_price_for_swap_x_to_y(self, dx: float) -> float:
+        """Return the average price (token1 per token0) for a swap of dx token0."""
+        dy = self.y - self.k / (self.x + dx)
+        return dy / dx
+
+    def average_price_for_swap_y_to_x(self, dy: float) -> float:
+        """Return the average price (token0 per token1) for a swap of dy token1."""
+        dx = self.x - self.k / (self.y + dy)
+        return dx / dy
+
+    def slippage_percent_x_to_y(self, dx: float) -> float:
+        """Return the percentage slippage for a swap of dx token0."""
+        avg_price = self.average_price_for_swap_x_to_y(dx)
+        marginal_price = self.price()
+        return (avg_price - marginal_price) / marginal_price * 100
+
     def add_liquidity(self, dx: float, dy: float) -> None:
         """
         Add liquidity proportionally. Assumes dy/dx == price.
@@ -58,10 +74,23 @@ class Pool:
         self.y -= dy_removed
         self.k = self.x * self.y
         return (dx_removed, dy_removed)
+
+
 if __name__ == "__main__":
     # Create a pool
     pool = Pool(1000, 1000)
     print(f"Initial: x={pool.x}, y={pool.y}, k={pool.k:.2f}, price={pool.price():.4f}")
+    print(f"Marginal price: {pool.price():.4f}")
+
+    small_trade = 10
+    avg_small = pool.average_price_for_swap_x_to_y(small_trade)
+    slip_small = pool.slippage_percent_x_to_y(small_trade)
+    print(f"Small trade dx={small_trade}: avg price={avg_small:.4f}, slippage={slip_small:.2f}%")
+
+    large_trade = 500
+    avg_large = pool.average_price_for_swap_x_to_y(large_trade)
+    slip_large = pool.slippage_percent_x_to_y(large_trade)
+    print(f"Large trade dx={large_trade}: avg price={avg_large:.4f}, slippage={slip_large:.2f}%")
 
     # Add liquidity
     pool.add_liquidity(500, 500)
