@@ -1,6 +1,6 @@
-#Progress
+##Progress
 
-24/3/2026
+##24/3/2026
 
 Simulating constant product, just as the beginig of the project and in honor of Uniswap.
 
