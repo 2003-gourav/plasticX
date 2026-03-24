@@ -1,7 +1,7 @@
 import random
 import numpy as np
 import matplotlib
-# Use non-interactive backend to avoid warnings
+# Use non-interactive backend
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
