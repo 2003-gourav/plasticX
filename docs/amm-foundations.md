@@ -28,3 +28,5 @@ The constant product invariant `x * y = k` is the heart of the simplest AMM. It 
 - **Liquidity**: Adding or removing liquidity scales the curve (changes `k`) but preserves the price if done proportionally.
 
 This invariant is what makes the AMM self‑consistent and transparent. All subsequent features (fees, curvature adaptation) build on top of it.
+
+Trades are discrete events that instantly change the reserves and price of an AMM. Each trade moves the pool along the invariant curve, and the order of trades matters because price moves nonlinearly
