@@ -18,3 +18,13 @@ When a trader swaps `dx` of token0 for token1, the contract ensures that after t
 dy= ydx/(x+dx)
 
 Through formula the x and y reserves are fighting against each other to enforce their valuability. 
+
+## The Invariant
+
+The constant product invariant `x * y = k` is the heart of the simplest AMM. It defines the relationship between the two reserves and guarantees that trades move the pool along a fixed curve.
+
+- **Geometric interpretation**: The curve is a hyperbola. The slope at any point gives the price.
+- **Trades**: Swap amounts are computed by solving the invariant equation.
+- **Liquidity**: Adding or removing liquidity scales the curve (changes `k`) but preserves the price if done proportionally.
+
+This invariant is what makes the AMM self‑consistent and transparent. All subsequent features (fees, curvature adaptation) build on top of it.
