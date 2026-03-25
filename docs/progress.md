@@ -14,3 +14,10 @@ I feel cheated now , TRADES order MATTER even if there are no other trafers. The
 11:44 pm , git add git commit , git pull , git push  tired . Simulations were impressive and worth seeing.
 
 Lets introduce the incentive to keep up the service
+
+## 25/3/2026
+
+Tried making lot of different invariants, was not knowing what I actually wanted fron the invraint, a little short of maths i felt not knowing hot to deal woirh ,how to make ehat i want to.
+Have ended up improving the constant product ,multipllied one more factor to it to embed the memory and momentum characteristics to it.
+
+The price equation is approximated , and then an invariant is made kind of reverse ething but that was the only way to do it.
