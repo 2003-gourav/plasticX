@@ -21,3 +21,7 @@ Tried making lot of different invariants, was not knowing what I actually wanted
 Have ended up improving the constant product ,multipllied one more factor to it to embed the memory and momentum characteristics to it.
 
 The price equation is approximated , and then an invariant is made kind of reverse ething but that was the only way to do it.
+
+## 26/3/2026 
+
+Few INVARIANTS tried for meme trading endlessly , earned astronomical fees , no liquidity protection , slippage one million percent. The Meme Market Maker is working .
