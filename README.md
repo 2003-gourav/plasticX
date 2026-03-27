@@ -1,4 +1,4 @@
-# PLASTICX Market Engine
+# PLASTICX - Automated "Meme Market Maker"
 
 Why I am making it ?
 Lost money in futures and options , those derivatives are not made for me & you. SO for YOU I am making a meme market maker which doesn't behaves like the other DeX , Cex built to trade memes for valuable purpose this one is for activity making money. Don't know how but lets just start.
