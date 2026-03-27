@@ -1,6 +1,6 @@
-# PLASTICX -
+# PLASTICX 
 
-#Automated "Meme Market Maker"
+# Automated - "Meme Market Maker"
 
 
 PLASTICX is an experimental automated Meme Market Maker (A-MMM) simulation that moves beyond the classic constant‑product model. It introduces a two‑dimensional state (Memory, Momentum) that jointly determine meme-price, creating a system where:
