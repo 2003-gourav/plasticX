@@ -25,3 +25,7 @@ The price equation is approximated , and then an invariant is made kind of rever
 ## 26/3/2026 
 
 Few INVARIANTS tried for meme trading endlessly , earned astronomical fees , no liquidity protection , slippage one million percent. The Meme Market Maker is working .
+
+## 31/3/2026
+
+We will continue with Uniswap (V2).
