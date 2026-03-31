@@ -161,4 +161,3 @@ plt.grid(True)
 plt.savefig('speculative_price.png', dpi=150)
 print("Price plot saved as 'speculative_price.png'")
 print("Simulation finished.")
-Explain this code ,the price emergence, trading effect, buy, sell operations, fee accumulation, liquidity,slippage, buyback everything
