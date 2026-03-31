@@ -29,3 +29,6 @@ Few INVARIANTS tried for meme trading endlessly , earned astronomical fees , no 
 ## 31/3/2026
 
 We will continue with Uniswap (V2).
+
+Started building the API so bots can talk.
+
