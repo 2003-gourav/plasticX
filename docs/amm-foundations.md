@@ -31,6 +31,14 @@ This invariant is what makes the AMM self‑consistent and transparent. All subs
 
 Trades are discrete events that instantly change the reserves and price of an AMM. Each trade moves the pool along the invariant curve, and the order of trades matters because price moves nonlinearly
 
+## Price Emerges
+
+In an AMM, price is not stored as a separate variable. It is derived from the invariant whenever needed. The marginal price (for an infinitesimal trade) is `y/x`. The average price for a trade of size `dx` is computed directly from the invariant and represents the actual rate the trader receives.
+
+This design eliminates stale price data, reduces attack surface, and keeps the system self‑consistent. The AMM does not need an oracle because the invariant is the oracle.
+
+We can compute slippage as the percent difference between marginal and average price. Larger trades incur higher slippage, reflecting the liquidity depth of the pool.
+
 ## FEES- Incentivve to keep the service
 
 Fees are essential to the economic sustainability of AMMs. They reward liquidity providers, protect against dilution, and generate activity signals that can be used for adaptation. By adding fees to our simulation, we move from a theoretical model to a realistic market engine
