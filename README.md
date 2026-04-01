@@ -32,3 +32,11 @@ We use DECIMAL instead of FLOAT to avoid rounding errors in financial calculatio
 
 - `/health` → checks database connection
 - `/markets` → returns markets from DB
+
+## API Endpoints
+
+- `GET /markets` – list all markets
+- `POST /markets` – create a new market
+- `POST /trade` – execute a swap
+  - Request: `{"market_id": 1, "direction": "buy" or "sell", "amount": 10.0}`
+  - Response: details of the trade including amount received, fee, and new price

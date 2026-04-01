@@ -32,3 +32,13 @@ We will continue with Uniswap (V2).
 
 Started building the API so bots can talk.
 
+## 1/4/2026
+
+## API Endpoints
+
+- `GET /markets` – list all markets
+- `POST /markets` – create a new market
+- `POST /trade` – execute a swap
+  - Request: `{"market_id": 1, "direction": "buy" or "sell", "amount": 10.0}`
+  - Response: details of the trade including amount received, fee, and new price
+
