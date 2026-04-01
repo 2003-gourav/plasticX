@@ -165,6 +165,7 @@ func trade(w http.ResponseWriter, r *http.Request) {
         return
     }
 
+    // Validation
     if req.MarketID <= 0 {
         http.Error(w, "market_id is required", http.StatusBadRequest)
         return
@@ -178,6 +179,7 @@ func trade(w http.ResponseWriter, r *http.Request) {
         return
     }
 
+    // Start transaction
     tx, err := db.DB.Begin()
     if err != nil {
         log.Printf("Begin transaction error: %v", err)
@@ -186,6 +188,7 @@ func trade(w http.ResponseWriter, r *http.Request) {
     }
     defer tx.Rollback()
 
+    // Lock market row
     var x, y, fee, treasury float64
     err = tx.QueryRow(
         "SELECT x_reserve, y_reserve, fee, treasury FROM markets WHERE id = $1 FOR UPDATE",
@@ -210,12 +213,16 @@ func trade(w http.ResponseWriter, r *http.Request) {
     if req.Direction == "buy" {
         direction = "buy"
         amountIn = req.Amount
-        dx, feePaid := pool.SwapYToX(amountIn)
+        // Declare dx, then assign from the swap
+        var dx float64
+        dx, feePaid = pool.SwapYToX(amountIn)
         amountOut = dx
     } else {
         direction = "sell"
         amountIn = req.Amount
-        dy, feePaid := pool.SwapXToY(amountIn)
+        // Declare dy, then assign from the swap
+        var dy float64
+        dy, feePaid = pool.SwapXToY(amountIn)
         amountOut = dy
     }
 
@@ -229,13 +236,12 @@ func trade(w http.ResponseWriter, r *http.Request) {
     // Automatic buyback if treasury exceeds 10% of y_reserve
     buybackThreshold := 0.1 * y
     if treasury > buybackThreshold {
+        buybackAmount := treasury
         // Use a fee‑less swap: treat treasury as y to buy x
-        buybackAmount := treasury*0.5
-        // Constant product without fee
         newX_bb := (newX * newY) / (newY + buybackAmount)
         xBought := newX - newX_bb
         newX = newX_bb
-        treasury = 0.5*treasury
+        treasury = 0
         log.Printf("Buyback triggered: used %.4f treasury to buy %.4f base tokens", buybackAmount, xBought)
     }
 
@@ -263,12 +269,14 @@ func trade(w http.ResponseWriter, r *http.Request) {
         return
     }
 
+    // Commit transaction
     if err := tx.Commit(); err != nil {
         log.Printf("Commit error: %v", err)
         http.Error(w, "Transaction failed", http.StatusInternalServerError)
         return
     }
 
+    // Respond to client
     newPrice := newY / newX
     resp := TradeResponse{
         MarketID:  req.MarketID,
@@ -283,7 +291,6 @@ func trade(w http.ResponseWriter, r *http.Request) {
     w.WriteHeader(http.StatusOK)
     json.NewEncoder(w).Encode(resp)
 }
-
 // getPrice handles GET /markets/{id}/price
 func getPrice(w http.ResponseWriter, r *http.Request) {
     if r.Method != http.MethodGet {
