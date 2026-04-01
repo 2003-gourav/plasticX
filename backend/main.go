@@ -1,22 +1,26 @@
 package main
 
 import (
+    "database/sql"
     "encoding/json"
     "fmt"
     "log"
     "net/http"
-    "database/sql"
+    "strconv"
+    "strings"
 
-    "github.com/2003-gourav/plasticX/backend/db" // import path
+    "github.com/2003-gourav/plasticX/backend/amm"
+    "github.com/2003-gourav/plasticX/backend/db"
 )
+
 type Market struct {
-        ID       int     `json:"id"`
-        Name     string  `json:"name"`
-        XReserve float64 `json:"x_reserve"`
-        YReserve float64 `json:"y_reserve"`
-        Fee      float64 `json:"fee"`
-    }
-    
+    ID       int     `json:"id"`
+    Name     string  `json:"name"`
+    XReserve float64 `json:"x_reserve"`
+    YReserve float64 `json:"y_reserve"`
+    Fee      float64 `json:"fee"`
+}
+
 type TradeRequest struct {
     MarketID  int     `json:"market_id"`
     Direction string  `json:"direction"` // "buy" or "sell"
@@ -32,12 +36,14 @@ type TradeResponse struct {
     Price      float64 `json:"price"`
     NewPrice   float64 `json:"new_price"`
 }
+
 type CreateMarketRequest struct {
     Name     string  `json:"name"`
     XReserve float64 `json:"x_reserve"`
     YReserve float64 `json:"y_reserve"`
     Fee      float64 `json:"fee"`
 }
+
 func main() {
     // Initialize database
     if err := db.Init(); err != nil {
@@ -48,16 +54,17 @@ func main() {
     http.HandleFunc("/", home)
     http.HandleFunc("/health", health)
     http.HandleFunc("/markets", func(w http.ResponseWriter, r *http.Request) {
-    switch r.Method {
-    case http.MethodGet:
-        getMarkets(w, r)
-    case http.MethodPost:
-        createMarket(w, r)
-    default:
-        http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-    }
-})
-	http.HandleFunc("/trade", trade)
+        switch r.Method {
+        case http.MethodGet:
+            getMarkets(w, r)
+        case http.MethodPost:
+            createMarket(w, r)
+        default:
+            http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+        }
+    })
+    http.HandleFunc("/trade", trade)
+    http.HandleFunc("/markets/", getPrice) // will handle /markets/{id}/price
 
     log.Println("Server starting on :8080")
     log.Fatal(http.ListenAndServe(":8080", nil))
@@ -68,7 +75,6 @@ func home(w http.ResponseWriter, r *http.Request) {
 }
 
 func health(w http.ResponseWriter, r *http.Request) {
-    // Check database connection
     if err := db.DB.Ping(); err != nil {
         w.WriteHeader(http.StatusInternalServerError)
         json.NewEncoder(w).Encode(map[string]string{"status": "unhealthy", "error": err.Error()})
@@ -87,10 +93,7 @@ func getMarkets(w http.ResponseWriter, r *http.Request) {
     }
     defer rows.Close()
 
-    
-
     var markets []Market
-
     for rows.Next() {
         var m Market
         if err := rows.Scan(&m.ID, &m.Name, &m.XReserve, &m.YReserve, &m.Fee); err != nil {
@@ -100,8 +103,6 @@ func getMarkets(w http.ResponseWriter, r *http.Request) {
         }
         markets = append(markets, m)
     }
-
-    // THIS 
     if err := rows.Err(); err != nil {
         log.Printf("Rows iteration error: %v", err)
         http.Error(w, "Internal server error", http.StatusInternalServerError)
@@ -109,24 +110,61 @@ func getMarkets(w http.ResponseWriter, r *http.Request) {
     }
 
     w.Header().Set("Content-Type", "application/json")
-
-    
     if markets == nil {
         markets = []Market{}
     }
-
     json.NewEncoder(w).Encode(markets)
 }
-func trade(w http.ResponseWriter, r *http.Request) {
-    var req TradeRequest
 
-    // Decode JSON
+func createMarket(w http.ResponseWriter, r *http.Request) {
+    var req CreateMarketRequest
     if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
         http.Error(w, "Invalid JSON", http.StatusBadRequest)
         return
     }
 
-    // Validation
+    if req.Name == "" {
+        http.Error(w, "name is required", http.StatusBadRequest)
+        return
+    }
+    if req.XReserve <= 0 || req.YReserve <= 0 {
+        http.Error(w, "reserves must be positive", http.StatusBadRequest)
+        return
+    }
+    if req.Fee <= 0 || req.Fee >= 0.1 {
+        http.Error(w, "fee must be between 0 and 0.1", http.StatusBadRequest)
+        return
+    }
+
+    var id int
+    err := db.DB.QueryRow(
+        "INSERT INTO markets(name, x_reserve, y_reserve, fee) VALUES($1, $2, $3, $4) RETURNING id",
+        req.Name, req.XReserve, req.YReserve, req.Fee,
+    ).Scan(&id)
+    if err != nil {
+        log.Printf("Insert error: %v", err)
+        http.Error(w, "Database error", http.StatusInternalServerError)
+        return
+    }
+
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(http.StatusCreated)
+    json.NewEncoder(w).Encode(map[string]interface{}{
+        "id":        id,
+        "name":      req.Name,
+        "x_reserve": req.XReserve,
+        "y_reserve": req.YReserve,
+        "fee":       req.Fee,
+    })
+}
+
+func trade(w http.ResponseWriter, r *http.Request) {
+    var req TradeRequest
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        http.Error(w, "Invalid JSON", http.StatusBadRequest)
+        return
+    }
+
     if req.MarketID <= 0 {
         http.Error(w, "market_id is required", http.StatusBadRequest)
         return
@@ -140,16 +178,14 @@ func trade(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    // Start transaction
     tx, err := db.DB.Begin()
     if err != nil {
         log.Printf("Begin transaction error: %v", err)
         http.Error(w, "Internal server error", http.StatusInternalServerError)
         return
     }
-    defer tx.Rollback() // safety net
+    defer tx.Rollback()
 
-    //Lock market row
     var x, y, fee, treasury float64
     err = tx.QueryRow(
         "SELECT x_reserve, y_reserve, fee, treasury FROM markets WHERE id = $1 FOR UPDATE",
@@ -165,45 +201,45 @@ func trade(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    //Compute AMM swap
-    var amountIn, amountOut, feePaid, newX, newY float64
+    // Create a pool with current reserves and fee
+    pool := amm.NewPool(x, y, fee)
+
+    var amountIn, amountOut, feePaid float64
     var direction string
 
     if req.Direction == "buy" {
         direction = "buy"
         amountIn = req.Amount
-        feePaid = amountIn * fee
-        netAmount := amountIn - feePaid
-        newY = y + netAmount
-        newX = (x * y) / newY
-        amountOut = x - newX
+        dx, feePaid := pool.SwapYToX(amountIn)
+        amountOut = dx
     } else {
         direction = "sell"
         amountIn = req.Amount
-        newX = x + amountIn
-        newY = (x * y) / newX
-        grossOut := y - newY
-        feePaid = grossOut * fee
-        amountOut = grossOut - feePaid
+        dy, feePaid := pool.SwapXToY(amountIn)
+        amountOut = dy
     }
 
-    // Update treasury
+    // Update new reserves from the pool
+    newX := pool.X
+    newY := pool.Y
+
+    // Add fee to treasury
     treasury += feePaid
 
     // Automatic buyback if treasury exceeds 10% of y_reserve
     buybackThreshold := 0.1 * y
     if treasury > buybackThreshold {
-        buybackAmount := treasury
-        // Buy back base token from pool using constant product formula
-        // Treat treasury as y_amount to buy x
-        newX_bb := (newX * newY) / (newY + buybackAmount) // new X after buyback
+        // Use a fee‑less swap: treat treasury as y to buy x
+        buybackAmount := treasury*0.5
+        // Constant product without fee
+        newX_bb := (newX * newY) / (newY + buybackAmount)
         xBought := newX - newX_bb
         newX = newX_bb
-        treasury = 0 // treasury used entirely for buyback
+        treasury = 0.5*treasury
         log.Printf("Buyback triggered: used %.4f treasury to buy %.4f base tokens", buybackAmount, xBought)
     }
 
-    // Update market reserves and treasury
+    // Update market
     _, err = tx.Exec(
         "UPDATE markets SET x_reserve = $1, y_reserve = $2, treasury = $3 WHERE id = $4",
         newX, newY, treasury, req.MarketID,
@@ -227,14 +263,12 @@ func trade(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    //Commit transaction
     if err := tx.Commit(); err != nil {
         log.Printf("Commit error: %v", err)
         http.Error(w, "Transaction failed", http.StatusInternalServerError)
         return
     }
 
-    // Respond to client
     newPrice := newY / newX
     resp := TradeResponse{
         MarketID:  req.MarketID,
@@ -249,53 +283,37 @@ func trade(w http.ResponseWriter, r *http.Request) {
     w.WriteHeader(http.StatusOK)
     json.NewEncoder(w).Encode(resp)
 }
-func createMarket(w http.ResponseWriter, r *http.Request) {
-    var req CreateMarketRequest
 
-    // Decode JSON
-    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-        http.Error(w, "Invalid JSON", http.StatusBadRequest)
+// getPrice handles GET /markets/{id}/price
+func getPrice(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodGet {
+        http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
         return
     }
-
-    // Validation
-    if req.Name == "" {
-        http.Error(w, "name is required", http.StatusBadRequest)
-        return
-    }
-
-    if req.XReserve <= 0 || req.YReserve <= 0 {
-        http.Error(w, "reserves must be positive", http.StatusBadRequest)
-        return
-    }
-
-    if req.Fee <= 0 || req.Fee >= 0.1 {
-        http.Error(w, "fee must be between 0 and 0.1", http.StatusBadRequest)
-        return
-    }
-
-    // Insert into DB
-    var id int
-    err := db.DB.QueryRow(
-        "INSERT INTO markets(name, x_reserve, y_reserve, fee) VALUES($1, $2, $3, $4) RETURNING id",
-        req.Name, req.XReserve, req.YReserve, req.Fee,
-    ).Scan(&id)
-
+    // Extract ID from path, e.g., /markets/1/price
+    path := strings.TrimPrefix(r.URL.Path, "/markets/")
+    idStr := strings.TrimSuffix(path, "/price")
+    id, err := strconv.Atoi(idStr)
     if err != nil {
-        log.Printf("Insert error: %v", err)
-        http.Error(w, "Database error", http.StatusInternalServerError)
+        http.Error(w, "Invalid market ID", http.StatusBadRequest)
         return
     }
 
-    // Response
-    w.Header().Set("Content-Type", "application/json")
-    w.WriteHeader(http.StatusCreated)
+    var x, y float64
+    err = db.DB.QueryRow("SELECT x_reserve, y_reserve FROM markets WHERE id = $1", id).Scan(&x, &y)
+    if err == sql.ErrNoRows {
+        http.Error(w, "Market not found", http.StatusNotFound)
+        return
+    }
+    if err != nil {
+        log.Printf("Price query error: %v", err)
+        http.Error(w, "Internal server error", http.StatusInternalServerError)
+        return
+    }
 
-    json.NewEncoder(w).Encode(map[string]interface{}{
-        "id":        id,
-        "name":      req.Name,
-        "x_reserve": req.XReserve,
-        "y_reserve": req.YReserve,
-        "fee":       req.Fee,
-    })
+    pool := amm.NewPool(x, y, 0) // fee not needed for price
+    price := pool.Price()
+
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(map[string]float64{"price": price})
 }
