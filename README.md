@@ -20,3 +20,15 @@ We use DECIMAL instead of FLOAT to avoid rounding errors in financial calculatio
 
 ### Foreign Key
 `trades.market_id` references `markets(id)` with ON DELETE CASCADE.
+
+## Database Setup
+
+1. Install PostgreSQL and create database `plastic`
+2. Run schema: `backend/db/schema.sql`
+3. Set DATABASE_URL (optional for local)
+4. Run server: `go run backend/main.go`
+
+### Endpoints
+
+- `/health` → checks database connection
+- `/markets` → returns markets from DB
