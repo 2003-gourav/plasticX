@@ -44,7 +44,7 @@ type CreateMarketRequest struct {
     YReserve float64 `json:"y_reserve"`
     Fee      float64 `json:"fee"`
 }
-
+const MinInitialLiquidity = 1000.0 // in base asset units
 func main() {
     // Initialize database
     if err := db.Init(); err != nil {
@@ -145,6 +145,10 @@ func createMarket(w http.ResponseWriter, r *http.Request) {
     }
     if req.Fee <= 0 || req.Fee >= 0.1 {
         http.Error(w, "fee must be between 0 and 0.1", http.StatusBadRequest)
+        return
+    }
+    if req.XReserve < MinInitialLiquidity {
+        http.Error(w, fmt.Sprintf("initial x_reserve must be at least %.2f", MinInitialLiquidity), http.StatusBadRequest)
         return
     }
 
