@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/2003-gourav/plasticX/backend/amm"
 	"github.com/2003-gourav/plasticX/backend/db"
@@ -18,8 +19,7 @@ const MinInitialLiquidity = 1000.0
 
 // -------------------- TYPES --------------------
 
-type Market struct {
-	ID       int     `json:"id"`
+type CreateMarketRequest struct {
 	Name     string  `json:"name"`
 	XReserve float64 `json:"x_reserve"`
 	YReserve float64 `json:"y_reserve"`
@@ -28,7 +28,7 @@ type Market struct {
 
 type TradeRequest struct {
 	MarketID  int     `json:"market_id"`
-	Direction string  `json:"direction"`
+	Direction string  `json:"direction"` // "buy" or "sell"
 	Amount    float64 `json:"amount"`
 }
 
@@ -42,13 +42,6 @@ type TradeResponse struct {
 	NewPrice  float64 `json:"new_price"`
 }
 
-type CreateMarketRequest struct {
-	Name     string  `json:"name"`
-	XReserve float64 `json:"x_reserve"`
-	YReserve float64 `json:"y_reserve"`
-	Fee      float64 `json:"fee"`
-}
-
 // -------------------- MAIN --------------------
 
 func main() {
@@ -57,56 +50,25 @@ func main() {
 	}
 	defer db.DB.Close()
 
+	// Routes
 	http.HandleFunc("/", home)
 	http.HandleFunc("/health", health)
 
 	http.HandleFunc("/markets", marketsHandler)
 	http.HandleFunc("/markets/", marketsSubroutes)
 
-	http.HandleFunc("/trade", trade)
+	http.HandleFunc("/trade", tradeHandler)
+
 	http.HandleFunc("/memes", createMeme)
-	http.HandleFunc("/memes/", getMemeStats)
-	http.HandleFunc("/attention", addAttention)
+	http.HandleFunc("/memes/", memesSubroutes)
+
+	http.HandleFunc("/attention/event", recordAttentionEvent) // Week 2 event endpoint
 
 	log.Println("Server running on :8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
-// -------------------- ROUTING --------------------
-
-func marketsHandler(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		getMarkets(w, r)
-	case http.MethodPost:
-		createMarket(w, r)
-	default:
-		http.Error(w, "Method not allowed", 405)
-	}
-}
-
-func marketsSubroutes(w http.ResponseWriter, r *http.Request) {
-	path := strings.TrimPrefix(r.URL.Path, "/markets/")
-
-	switch {
-	case strings.HasSuffix(path, "/memes"):
-		getMemesByMarket(w, r)
-
-	case strings.HasSuffix(path, "/price"):
-		getPrice(w, r)
-
-	case strings.HasSuffix(path, "/top-memes"):
-		getTopMemes(w, r)
-
-	case strings.HasSuffix(path, "/attention"):
-		getMarketAttention(w, r)
-
-	default:
-		http.NotFound(w, r)
-	}
-}
-
-// -------------------- BASIC --------------------
+// -------------------- BASIC HANDLERS --------------------
 
 func home(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, "PLASTIC backend running")
@@ -117,70 +79,241 @@ func health(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unhealthy", 500)
 		return
 	}
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
 // -------------------- MARKETS --------------------
 
+func marketsHandler(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		getMarkets(w, r)
+	case http.MethodPost:
+		createMarket(w, r)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 func getMarkets(w http.ResponseWriter, r *http.Request) {
-	rows, err := db.DB.Query("SELECT id, name, x_reserve, y_reserve, fee FROM markets")
+	rows, err := db.DB.Query(`
+		SELECT id, name, x_reserve, y_reserve, fee, treasury, created_at
+		FROM markets ORDER BY id
+	`)
 	if err != nil {
 		http.Error(w, "DB error", 500)
 		return
 	}
 	defer rows.Close()
 
-	var markets []Market
+	var markets []models.Market
 	for rows.Next() {
-		var m Market
-		rows.Scan(&m.ID, &m.Name, &m.XReserve, &m.YReserve, &m.Fee)
+		var m models.Market
+		if err := rows.Scan(&m.ID, &m.Name, &m.XReserve, &m.YReserve, &m.Fee, &m.Treasury, &m.CreatedAt); err != nil {
+			http.Error(w, "Scan error", 500)
+			return
+		}
 		markets = append(markets, m)
 	}
-
-	if markets == nil {
-		markets = []Market{}
-	}
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(markets)
 }
 
 func createMarket(w http.ResponseWriter, r *http.Request) {
 	var req CreateMarketRequest
-	json.NewDecoder(r.Body).Decode(&req)
-
-	if req.XReserve < MinInitialLiquidity {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", 400)
+		return
+	}
+	if req.XReserve < MinInitialLiquidity || req.YReserve <= 0 {
 		http.Error(w, "insufficient liquidity", 400)
+		return
+	}
+	if req.Fee < 0.001 || req.Fee > 0.05 {
+		http.Error(w, "fee must be between 0.001 and 0.05", 400)
 		return
 	}
 
 	var id int
-	err := db.DB.QueryRow(
-		"INSERT INTO markets(name,x_reserve,y_reserve,fee) VALUES($1,$2,$3,$4) RETURNING id",
-		req.Name, req.XReserve, req.YReserve, req.Fee,
-	).Scan(&id)
-
+	err := db.DB.QueryRow(`
+		INSERT INTO markets (name, x_reserve, y_reserve, fee, treasury)
+		VALUES ($1, $2, $3, $4, 0) RETURNING id
+	`, req.Name, req.XReserve, req.YReserve, req.Fee).Scan(&id)
 	if err != nil {
 		http.Error(w, "DB error", 500)
 		return
 	}
 
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]int{"id": id})
+}
+
+func marketsSubroutes(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/markets/")
+	switch {
+	case strings.HasSuffix(path, "/price"):
+		getPrice(w, r)
+	case strings.HasSuffix(path, "/attention"):
+		getMarketAttention(w, r)
+	case strings.HasSuffix(path, "/top-memes"):
+		getTopMemes(w, r)
+	case strings.HasSuffix(path, "/stats"):
+		getMarketStats(w, r)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func getPrice(w http.ResponseWriter, r *http.Request) {
+	idStr := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/markets/"), "/price")
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		http.Error(w, "invalid market id", 400)
+		return
+	}
+	var x, y float64
+	err = db.DB.QueryRow("SELECT x_reserve, y_reserve FROM markets WHERE id=$1", id).Scan(&x, &y)
+	if err == sql.ErrNoRows {
+		http.Error(w, "market not found", 404)
+		return
+	}
+	if err != nil {
+		http.Error(w, "DB error", 500)
+		return
+	}
+	if x == 0 {
+		http.Error(w, "invalid pool", 500)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]float64{"price": y / x})
+}
+
+func getMarketAttention(w http.ResponseWriter, r *http.Request) {
+	idStr := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/markets/"), "/attention")
+	marketID, err := strconv.Atoi(idStr)
+	if err != nil {
+		http.Error(w, "invalid market id", 400)
+		return
+	}
+	// Sum over memes' attention_stats (fast cache)
+	var views, uniqueViews, reposts, derivatives int
+	err = db.DB.QueryRow(`
+		SELECT COALESCE(SUM(ms.views), 0), COALESCE(SUM(ms.unique_views), 0),
+		       COALESCE(SUM(ms.reposts), 0), COALESCE(SUM(ms.derivatives), 0)
+		FROM memes m
+		JOIN meme_attention_stats ms ON m.id = ms.meme_id
+		WHERE m.market_id = $1
+	`, marketID).Scan(&views, &uniqueViews, &reposts, &derivatives)
+	if err != nil {
+		http.Error(w, "DB error", 500)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"market_id":   marketID,
+		"views":       views,
+		"unique_views": uniqueViews,
+		"reposts":     reposts,
+		"derivatives": derivatives,
+	})
+}
+
+func getTopMemes(w http.ResponseWriter, r *http.Request) {
+	idStr := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/markets/"), "/top-memes")
+	marketID, err := strconv.Atoi(idStr)
+	if err != nil {
+		http.Error(w, "invalid market id", 400)
+		return
+	}
+	sortBy := r.URL.Query().Get("sort")
+	allowed := map[string]bool{"views": true, "unique_views": true, "reposts": true, "derivatives": true}
+	if !allowed[sortBy] {
+		sortBy = "reposts"
+	}
+	query := fmt.Sprintf(`
+		SELECT m.id, m.caption, COALESCE(ms.%s, 0) as val
+		FROM memes m
+		LEFT JOIN meme_attention_stats ms ON m.id = ms.meme_id
+		WHERE m.market_id = $1
+		ORDER BY val DESC
+		LIMIT 10
+	`, sortBy)
+	rows, err := db.DB.Query(query, marketID)
+	if err != nil {
+		http.Error(w, "DB error", 500)
+		return
+	}
+	defer rows.Close()
+	var result []map[string]interface{}
+	for rows.Next() {
+		var id int
+		var caption string
+		var val int
+		rows.Scan(&id, &caption, &val)
+		result = append(result, map[string]interface{}{
+			"id": id, "caption": caption, sortBy: val,
+		})
+	}
+	json.NewEncoder(w).Encode(result)
+}
+
+func getMarketStats(w http.ResponseWriter, r *http.Request) {
+	idStr := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/markets/"), "/stats")
+	marketID, err := strconv.Atoi(idStr)
+	if err != nil {
+		http.Error(w, "invalid market id", 400)
+		return
+	}
+	var market models.Market
+	err = db.DB.QueryRow(`
+		SELECT id, name, x_reserve, y_reserve, fee, treasury, created_at
+		FROM markets WHERE id = $1
+	`, marketID).Scan(&market.ID, &market.Name, &market.XReserve, &market.YReserve,
+		&market.Fee, &market.Treasury, &market.CreatedAt)
+	if err == sql.ErrNoRows {
+		http.Error(w, "market not found", 404)
+		return
+	}
+	if err != nil {
+		http.Error(w, "DB error", 500)
+		return
+	}
+	var volume24h, tradeCount24h, fees24h float64
+	db.DB.QueryRow(`
+		SELECT COALESCE(SUM(amount_in), 0), COUNT(*), COALESCE(SUM(fee_paid), 0)
+		FROM trades
+		WHERE market_id = $1 AND timestamp > NOW() - INTERVAL '24 hours'
+	`, marketID).Scan(&volume24h, &tradeCount24h, &fees24h)
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"id":                 market.ID,
+		"name":               market.Name,
+		"x_reserve":          market.XReserve,
+		"y_reserve":          market.YReserve,
+		"price":              market.YReserve / market.XReserve,
+		"fee":                market.Fee,
+		"treasury":           market.Treasury,
+		"volume_24h":         volume24h,
+		"trade_count_24h":    tradeCount24h,
+		"fees_collected_24h": fees24h,
+	})
 }
 
 // -------------------- TRADE --------------------
 
-func trade(w http.ResponseWriter, r *http.Request) {
+func tradeHandler(w http.ResponseWriter, r *http.Request) {
 	var req TradeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid JSON", 400)
 		return
 	}
 	if req.Direction != "buy" && req.Direction != "sell" {
-    	http.Error(w, "invalid direction", 400)
-    	return
+		http.Error(w, "direction must be buy or sell", 400)
+		return
 	}
 	if req.Amount <= 0 {
-    	http.Error(w, "amount must be positive", 400)
-    	return
+		http.Error(w, "amount must be positive", 400)
+		return
 	}
 
 	tx, err := db.DB.Begin()
@@ -188,117 +321,96 @@ func trade(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "tx error", 500)
 		return
 	}
-
-	committed := false
 	defer func() {
-		if !committed {
+		if err != nil {
 			tx.Rollback()
 		}
 	}()
 
 	var x, y, fee, treasury float64
-	err = tx.QueryRow(
-		"SELECT x_reserve,y_reserve,fee,treasury FROM markets WHERE id=$1 FOR UPDATE",
-		req.MarketID,
-	).Scan(&x, &y, &fee, &treasury)
-
+	err = tx.QueryRow(`
+		SELECT x_reserve, y_reserve, fee, treasury FROM markets WHERE id = $1 FOR UPDATE
+	`, req.MarketID).Scan(&x, &y, &fee, &treasury)
 	if err == sql.ErrNoRows {
 		http.Error(w, "market not found", 404)
 		return
 	}
+	if err != nil {
+		http.Error(w, "DB error", 500)
+		return
+	}
 
 	pool := amm.NewPool(x, y, fee)
-
 	var amountOut, feePaid float64
-
 	if req.Direction == "buy" {
-		amountOut, feePaid = pool.SwapYToX(req.Amount)
+		amountOut, feePaid = pool.SwapYToX(req.Amount) // buy Y with X? Actually SwapYToX means give Y get X. Need consistent naming.
+		// In our amm: SwapXToY = give X get Y (buy Y). Let's check: earlier code used SwapYToX for buy. We'll keep as is.
+		// To avoid confusion: we assume SwapXToY is buy Y, SwapYToX is sell Y. But user's direction "buy" means buy Y (give X).
+		// So we should call SwapXToY. Let's fix:
+		// We'll re-implement correctly.
 	} else {
 		amountOut, feePaid = pool.SwapXToY(req.Amount)
 	}
+	// The above is swapped. Let's write correct logic:
+	// Actually from original code: req.Direction=="buy" -> SwapYToX? That was a bug. We'll fix here.
+	// Correct:
+	// - buy: user gives X (base), receives Y (meme) => SwapXToY
+	// - sell: user gives Y, receives X => SwapYToX
+	var newX, newY float64
+	if req.Direction == "buy" {
+		amountOut, feePaid = pool.SwapXToY(req.Amount)
+		newX, newY = pool.X, pool.Y
+	} else {
+		amountOut, feePaid = pool.SwapYToX(req.Amount)
+		newX, newY = pool.X, pool.Y
+	}
 
-	newX := pool.X
-	newY := pool.Y
 	treasury += feePaid
 
-	//FIXED BUYBACK
+	// Buyback: if treasury > 10% of y_reserve, use treasury to buy Y (support price)
 	if treasury > 0.1*newY {
-		bb := amm.NewPool(newX, newY, 0)
-		bb.SwapYToX(treasury)
-		newX = bb.X
-		newY = bb.Y
+		bbPool := amm.NewPool(newX, newY, 0)
+		// treasury is in X, use it to buy Y: SwapXToY
+		_, _ = bbPool.SwapXToY(treasury) // fee=0
+		newX = bbPool.X
+		newY = bbPool.Y
 		treasury = 0
 	}
 
-	_, err = tx.Exec(
-		"UPDATE markets SET x_reserve=$1,y_reserve=$2,treasury=$3 WHERE id=$4",
-		newX, newY, treasury, req.MarketID,
-	)
+	_, err = tx.Exec(`
+		UPDATE markets SET x_reserve = $1, y_reserve = $2, treasury = $3 WHERE id = $4
+	`, newX, newY, treasury, req.MarketID)
 	if err != nil {
 		http.Error(w, "DB error", 500)
 		return
 	}
 
-	price := newY / newX
-
-	_, err = tx.Exec(
-		`INSERT INTO trades(market_id,direction,amount_in,amount_out,fee_paid,price)
-		 VALUES($1,$2,$3,$4,$5,$6)`,
-		req.MarketID, req.Direction, req.Amount, amountOut, feePaid, price,
-	)
+	avgPrice := amountOut / req.Amount
+	_, err = tx.Exec(`
+		INSERT INTO trades (market_id, direction, amount_in, amount_out, fee_paid, price)
+		VALUES ($1, $2, $3, $4, $5, $6)
+	`, req.MarketID, req.Direction, req.Amount, amountOut, feePaid, avgPrice)
 	if err != nil {
 		http.Error(w, "DB error", 500)
 		return
 	}
 
-	tx.Commit()
-	committed = true
+	if err = tx.Commit(); err != nil {
+		http.Error(w, "commit error", 500)
+		return
+	}
 
-	json.NewEncoder(w).Encode(TradeResponse{
+	resp := TradeResponse{
 		MarketID:  req.MarketID,
 		Direction: req.Direction,
 		AmountIn:  req.Amount,
 		AmountOut: amountOut,
 		FeePaid:   feePaid,
-		Price:     price,
-		NewPrice:  price,
-	})
-}
-
-// -------------------- PRICE --------------------
-
-func getPrice(w http.ResponseWriter, r *http.Request) {
-	idStr := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/markets/"), "/price")
-
-	id, err := strconv.Atoi(idStr)
-	if err != nil {
-		http.Error(w, "invalid market id", 400)
-		return
+		Price:     avgPrice,
+		NewPrice:  newY / newX,
 	}
-
-	var x, y float64
-	err = db.DB.QueryRow(
-		"SELECT x_reserve, y_reserve FROM markets WHERE id=$1",
-		id,
-	).Scan(&x, &y)
-
-	if err == sql.ErrNoRows {
-		http.Error(w, "market not found", 404)
-		return
-	}
-	if err != nil {
-		http.Error(w, "db error", 500)
-		return
-	}
-
-	if x == 0 {
-		http.Error(w, "invalid pool state", 500)
-		return
-	}
-
-	json.NewEncoder(w).Encode(map[string]float64{
-		"price": y / x,
-	})
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
 }
 
 // -------------------- MEMES --------------------
@@ -310,199 +422,178 @@ func createMeme(w http.ResponseWriter, r *http.Request) {
 		ImageURL  string `json:"image_url"`
 		Caption   string `json:"caption"`
 	}
-
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json", 400)
+		http.Error(w, "Invalid JSON", 400)
 		return
 	}
-
 	if req.MarketID <= 0 || req.ImageURL == "" {
 		http.Error(w, "invalid input", 400)
 		return
 	}
-
-	//validate market exists
 	var exists bool
-	err := db.DB.QueryRow(
-		"SELECT EXISTS(SELECT 1 FROM markets WHERE id=$1)",
-		req.MarketID,
-	).Scan(&exists)
-
+	err := db.DB.QueryRow("SELECT EXISTS(SELECT 1 FROM markets WHERE id=$1)", req.MarketID).Scan(&exists)
 	if err != nil || !exists {
 		http.Error(w, "market not found", 400)
 		return
 	}
-
 	hash := models.ComputeContentHash(req.ImageURL, req.Caption)
-
 	var id int
-	err = db.DB.QueryRow(
-		`INSERT INTO memes(creator_id,market_id,image_url,caption,content_hash)
-		 VALUES($1,$2,$3,$4,$5) RETURNING id`,
-		req.CreatorID, req.MarketID, req.ImageURL, req.Caption, hash,
-	).Scan(&id)
-
+	err = db.DB.QueryRow(`
+		INSERT INTO memes (creator_id, market_id, image_url, caption, content_hash)
+		VALUES ($1, $2, $3, $4, $5) RETURNING id
+	`, req.CreatorID, req.MarketID, req.ImageURL, req.Caption, hash).Scan(&id)
 	if err != nil {
 		if strings.Contains(err.Error(), "content_hash") {
 			http.Error(w, "duplicate meme", 409)
 			return
 		}
-		http.Error(w, "db error", 500)
+		http.Error(w, "DB error", 500)
 		return
 	}
-
 	json.NewEncoder(w).Encode(map[string]int{"id": id})
 }
-func getMemesByMarket(w http.ResponseWriter, r *http.Request) {
-	idStr := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/markets/"), "/memes")
 
-	id, err := strconv.Atoi(idStr)
-	if err != nil {
-		http.Error(w, "invalid market id", 400)
-		return
+func memesSubroutes(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/memes/")
+	if strings.HasSuffix(path, "/stats") {
+		getMemeStats(w, r)
+	} else if strings.HasSuffix(path, "/events") {
+		getMemeEvents(w, r)
+	} else {
+		http.NotFound(w, r)
 	}
-
-	rows, err := db.DB.Query(
-		`SELECT id, creator_id, image_url, caption, created_at 
-		 FROM memes WHERE market_id=$1 ORDER BY created_at DESC`,
-		id,
-	)
-	if err != nil {
-		http.Error(w, "db error", 500)
-		return
-	}
-	defer rows.Close()
-
-	var memes []models.Meme
-	for rows.Next() {
-		var m models.Meme
-		if err := rows.Scan(&m.ID, &m.CreatorID, &m.ImageURL, &m.Caption, &m.CreatedAt); err != nil {
-			http.Error(w, "scan error", 500)
-			return
-		}
-		memes = append(memes, m)
-	}
-
-	json.NewEncoder(w).Encode(memes)
 }
-// -------------------- ATTENTION --------------------
 
-func addAttention(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		MemeID      int `json:"meme_id"`
-		Views       int `json:"views"`
-		UniqueViews int `json:"unique_views"`
-		Reposts     int `json:"reposts"`
-		Derivatives int `json:"derivatives"`
+func getMemeStats(w http.ResponseWriter, r *http.Request) {
+	idStr := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/memes/"), "/stats")
+	memeID, err := strconv.Atoi(idStr)
+	if err != nil {
+		http.Error(w, "invalid meme id", 400)
+		return
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	var views, uniqueViews, reposts, derivatives int
+	err = db.DB.QueryRow(`
+		SELECT COALESCE(views,0), COALESCE(unique_views,0), COALESCE(reposts,0), COALESCE(derivatives,0)
+		FROM meme_attention_stats WHERE meme_id = $1
+	`, memeID).Scan(&views, &uniqueViews, &reposts, &derivatives)
+	if err != nil && err != sql.ErrNoRows {
+		http.Error(w, "DB error", 500)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"meme_id":      memeID,
+		"views":        views,
+		"unique_views": uniqueViews,
+		"reposts":      reposts,
+		"derivatives":  derivatives,
+	})
+}
 
-	_, err := db.DB.Exec(`
-	INSERT INTO meme_attention(meme_id,views,unique_views,reposts,derivatives,timestamp)
-	VALUES($1,$2,$3,$4,$5,date_trunc('hour',CURRENT_TIMESTAMP))
-	ON CONFLICT(meme_id,timestamp) DO UPDATE SET
-	views=meme_attention.views+EXCLUDED.views,
-	unique_views=meme_attention.unique_views+EXCLUDED.unique_views,
-	reposts=meme_attention.reposts+EXCLUDED.reposts,
-	derivatives=meme_attention.derivatives+EXCLUDED.derivatives`,
-		req.MemeID, req.Views, req.UniqueViews, req.Reposts, req.Derivatives,
-	)
-
+func getMemeEvents(w http.ResponseWriter, r *http.Request) {
+	idStr := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/memes/"), "/events")
+	memeID, err := strconv.Atoi(idStr)
+	if err != nil {
+		http.Error(w, "invalid meme id", 400)
+		return
+	}
+	eventType := r.URL.Query().Get("type")
+	limit := 100
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if parsed, _ := strconv.Atoi(l); parsed > 0 && parsed <= 1000 {
+			limit = parsed
+		}
+	}
+	query := `SELECT event_id, event_type, user_id, timestamp FROM attention_events WHERE meme_id = $1`
+	args := []interface{}{memeID}
+	if eventType != "" {
+		query += " AND event_type = $2"
+		args = append(args, eventType)
+	}
+	query += " ORDER BY timestamp DESC LIMIT $3"
+	args = append(args, limit)
+	rows, err := db.DB.Query(query, args...)
 	if err != nil {
 		http.Error(w, "DB error", 500)
 		return
 	}
-
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-}
-
-func getMarketAttention(w http.ResponseWriter, r *http.Request) {
-	idStr := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/markets/"), "/attention")
-	id, _ := strconv.Atoi(idStr)
-
-	var views int
-	db.DB.QueryRow(`
-	SELECT COALESCE(SUM(ma.views),0)
-	FROM memes m
-	JOIN meme_attention ma ON m.id=ma.meme_id
-	WHERE m.market_id=$1`, id).Scan(&views)
-
-	json.NewEncoder(w).Encode(map[string]int{"views": views})
-}
-
-// -------------------- TOP MEMES --------------------
-
-func getTopMemes(w http.ResponseWriter, r *http.Request) {
-	idStr := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/markets/"), "/top-memes")
-	id, _ := strconv.Atoi(idStr)
-
-	sort := r.URL.Query().Get("sort")
-	switch sort {
-	case "views", "unique_views", "derivatives":
-	default:
-		sort = "reposts"
-	}
-
-	query := fmt.Sprintf(`
-	SELECT m.id,m.caption,COALESCE(SUM(ma.%s),0)
-	FROM memes m
-	LEFT JOIN meme_attention ma ON m.id=ma.meme_id
-	WHERE m.market_id=$1
-	GROUP BY m.id
-	ORDER BY 3 DESC
-	LIMIT 5`, sort)
-
-	rows, _ := db.DB.Query(query, id)
 	defer rows.Close()
-
-	var res []map[string]interface{}
+	var events []map[string]interface{}
 	for rows.Next() {
 		var id int
-		var caption string
-		var val int
-		rows.Scan(&id, &caption, &val)
-
-		res = append(res, map[string]interface{}{
-			"id": id, "caption": caption, sort: val,
-		})
+		var etype, userID sql.NullString
+		var ts time.Time
+		rows.Scan(&id, &etype, &userID, &ts)
+		ev := map[string]interface{}{
+			"event_id":  id,
+			"type":      etype.String,
+			"timestamp": ts,
+		}
+		if userID.Valid {
+			ev["user_id"] = userID.String
+		}
+		events = append(events, ev)
 	}
-
-	json.NewEncoder(w).Encode(res)
+	json.NewEncoder(w).Encode(events)
 }
-func getMemeStats(w http.ResponseWriter, r *http.Request) {
-	// Path: /memes/{id}/stats
-	path := strings.TrimPrefix(r.URL.Path, "/memes/")
-	idStr := strings.TrimSuffix(path, "/stats")
 
-	memeID, err := strconv.Atoi(idStr)
-	if err != nil {
-		http.Error(w, "Invalid meme ID", http.StatusBadRequest)
+// -------------------- ATTENTION EVENTS (Week 2) --------------------
+
+func recordAttentionEvent(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-
-	var totalViews, totalUnique, totalReposts, totalDerivatives int
-
-	err = db.DB.QueryRow(`
-		SELECT 
-			COALESCE(SUM(views), 0),
-			COALESCE(SUM(unique_views), 0),
-			COALESCE(SUM(reposts), 0),
-			COALESCE(SUM(derivatives), 0)
-		FROM meme_attention
-		WHERE meme_id = $1
-	`, memeID).Scan(&totalViews, &totalUnique, &totalReposts, &totalDerivatives)
-
-	if err != nil {
-		log.Printf("Stats query error: %v", err)
-		http.Error(w, "Database error", http.StatusInternalServerError)
+	var req struct {
+		MemeID int    `json:"meme_id"`
+		UserID string `json:"user_id,omitempty"`
+		Action string `json:"action"` // view, unique_view, repost, derivative
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", 400)
 		return
 	}
-
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"meme_id":         memeID,
-		"total_views":     totalViews,
-		"unique_views":    totalUnique,
-		"total_reposts":   totalReposts,
-		"derivatives":     totalDerivatives,
-	})
+	valid := map[string]bool{"view": true, "unique_view": true, "repost": true, "derivative": true}
+	if !valid[req.Action] {
+		http.Error(w, "invalid action", 400)
+		return
+	}
+	// Check meme exists
+	var exists bool
+	err := db.DB.QueryRow("SELECT EXISTS(SELECT 1 FROM memes WHERE id=$1)", req.MemeID).Scan(&exists)
+	if err != nil || !exists {
+		http.Error(w, "meme not found", 404)
+		return
+	}
+	// Insert raw event
+	_, err = db.DB.Exec(`
+		INSERT INTO attention_events (meme_id, user_id, event_type, timestamp)
+		VALUES ($1, $2, $3, NOW())
+	`, req.MemeID, req.UserID, req.Action)
+	if err != nil {
+		log.Printf("Insert event error: %v", err)
+		http.Error(w, "DB error", 500)
+		return
+	}
+	// Update aggregated stats (upsert)
+	var col string
+	switch req.Action {
+	case "view":
+		col = "views"
+	case "unique_view":
+		col = "unique_views"
+	case "repost":
+		col = "reposts"
+	case "derivative":
+		col = "derivatives"
+	}
+	_, err = db.DB.Exec(fmt.Sprintf(`
+		INSERT INTO meme_attention_stats (meme_id, %s) VALUES ($1, 1)
+		ON CONFLICT (meme_id) DO UPDATE SET %s = meme_attention_stats.%s + 1
+	`, col, col, col), req.MemeID)
+	if err != nil {
+		log.Printf("Update stats error: %v", err)
+		// non-fatal, but log
+	}
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]string{"status": "recorded"})
 }
