@@ -490,53 +490,65 @@ func getMemeStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func getMemeEvents(w http.ResponseWriter, r *http.Request) {
-	idStr := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/memes/"), "/events")
-	memeID, err := strconv.Atoi(idStr)
-	if err != nil {
-		http.Error(w, "invalid meme id", 400)
-		return
-	}
-	eventType := r.URL.Query().Get("type")
-	limit := 100
-	if l := r.URL.Query().Get("limit"); l != "" {
-		if parsed, _ := strconv.Atoi(l); parsed > 0 && parsed <= 1000 {
-			limit = parsed
-		}
-	}
-	query := `SELECT event_id, event_type, user_id, timestamp FROM attention_events WHERE meme_id = $1`
-	args := []interface{}{memeID}
-	if eventType != "" {
-		query += " AND event_type = $2"
-		args = append(args, eventType)
-	}
-	query += " ORDER BY timestamp DESC LIMIT $3"
-	args = append(args, limit)
-	rows, err := db.DB.Query(query, args...)
-	if err != nil {
-		http.Error(w, "DB error", 500)
-		return
-	}
-	defer rows.Close()
-	var events []map[string]interface{}
-	for rows.Next() {
-		var id int
-		var etype, userID sql.NullString
-		var ts time.Time
-		rows.Scan(&id, &etype, &userID, &ts)
-		ev := map[string]interface{}{
-			"event_id":  id,
-			"type":      etype.String,
-			"timestamp": ts,
-		}
-		if userID.Valid {
-			ev["user_id"] = userID.String
-		}
-		events = append(events, ev)
-	}
-	json.NewEncoder(w).Encode(events)
-}
+    idStr := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/memes/"), "/events")
+    memeID, err := strconv.Atoi(idStr)
+    if err != nil {
+        http.Error(w, "invalid meme id", 400)
+        return
+    }
 
-// -------------------- ATTENTION EVENTS (Week 2) --------------------
+    eventType := r.URL.Query().Get("type")
+    limit := 100
+    if l := r.URL.Query().Get("limit"); l != "" {
+        if parsed, _ := strconv.Atoi(l); parsed > 0 && parsed <= 1000 {
+            limit = parsed
+        }
+    }
+
+    // Build query with correct column names
+    query := `SELECT event_id, event_type, COALESCE(user_id, '') as user_id, timestamp 
+              FROM attention_events 
+              WHERE meme_id = $1`
+    args := []interface{}{memeID}
+    if eventType != "" {
+        query += " AND event_type = $2"
+        args = append(args, eventType)
+    }
+    query += " ORDER BY timestamp DESC LIMIT $3"
+    args = append(args, limit)
+
+    rows, err := db.DB.Query(query, args...)
+    if err != nil {
+        log.Printf("Query error: %v", err)
+        http.Error(w, "DB error", 500)
+        return
+    }
+    defer rows.Close()
+
+    type Event struct {
+        EventID   int       `json:"event_id"`
+        EventType string    `json:"event_type"`
+        UserID    string    `json:"user_id,omitempty"`
+        Timestamp time.Time `json:"timestamp"`
+    }
+    var events []Event
+    for rows.Next() {
+        var e Event
+        var userID string
+        if err := rows.Scan(&e.EventID, &e.EventType, &userID, &e.Timestamp); err != nil {
+            log.Printf("Scan error: %v", err)
+            http.Error(w, "Scan error", 500)
+            return
+        }
+        if userID != "" {
+            e.UserID = userID
+        }
+        events = append(events, e)
+    }
+
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(events)
+}// -------------------- ATTENTION EVENTS (Week 2) --------------------
 
 func recordAttentionEvent(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
