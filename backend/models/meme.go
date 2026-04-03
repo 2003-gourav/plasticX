@@ -16,7 +16,7 @@ type Meme struct {
     CreatedAt  string `json:"created_at"`
 }
 
-func computeContentHash(imageURL, caption string) string {
+func ComputeContentHash(imageURL, caption string) string {
     data := fmt.Sprintf("%s|%s", imageURL, caption)
     hash := sha256.Sum256([]byte(data))
     return hex.EncodeToString(hash[:])
