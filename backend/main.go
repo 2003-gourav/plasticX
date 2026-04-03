@@ -241,7 +241,7 @@ func trade(w http.ResponseWriter, r *http.Request) {
         newX_bb := (newX * newY) / (newY + buybackAmount)
         xBought := newX - newX_bb
         newX = newX_bb
-        treasury = 0
+        treasury = treasury - buybackAmount
         log.Printf("Buyback triggered: used %.4f treasury to buy %.4f base tokens", buybackAmount, xBought)
     }
 
