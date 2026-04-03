@@ -361,7 +361,7 @@ func createMeme(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    hash := computeContentHash(req.ImageURL, req.Caption)
+    hash := models.ComputeContentHash(req.ImageURL, req.Caption)
 
     var memeID int
     err = db.DB.QueryRow(`
@@ -399,9 +399,9 @@ func getMemesByMarket(w http.ResponseWriter, r *http.Request) {
     }
     defer rows.Close()
 
-    var memes []Meme
+    var memes []models.Meme
     for rows.Next() {
-        var m Meme
+        var m models.Meme
         if err := rows.Scan(&m.ID, &m.CreatorID, &m.ImageURL, &m.Caption, &m.CreatedAt); err != nil {
             http.Error(w, "Scan error", http.StatusInternalServerError)
             return
