@@ -221,7 +221,7 @@ func trade(w http.ResponseWriter, r *http.Request) {
 	newY := pool.Y
 	treasury += feePaid
 
-	// ✅ FIXED BUYBACK
+	//FIXED BUYBACK
 	if treasury > 0.1*newY {
 		bb := amm.NewPool(newX, newY, 0)
 		bb.SwapYToX(treasury)
@@ -272,7 +272,13 @@ func getPrice(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.Atoi(idStr)
 
 	var x, y float64
+	err := db.DB.QueryRow(...).Scan(&x, &y)
+	if err == sql.ErrNoRows {
+    	http.Error(w, "market not found", 404)
+    	return
+	}
 	db.DB.QueryRow("SELECT x_reserve,y_reserve FROM markets WHERE id=$1", id).Scan(&x, &y)
+	
 
 	json.NewEncoder(w).Encode(map[string]float64{"price": y / x})
 }
@@ -308,7 +314,11 @@ func createMeme(w http.ResponseWriter, r *http.Request) {
 func getMemesByMarket(w http.ResponseWriter, r *http.Request) {
 	idStr := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/markets/"), "/memes")
 	id, _ := strconv.Atoi(idStr)
-
+	rows, err := db.DB.Query(...)
+	if err != nil {
+    	http.Error(w, "DB error", 500)
+    	return
+	}
 	rows, _ := db.DB.Query(
 		`SELECT id,creator_id,image_url,caption,created_at FROM memes WHERE market_id=$1`,
 		id,
