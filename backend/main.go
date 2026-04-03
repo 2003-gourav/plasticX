@@ -66,6 +66,17 @@ func main() {
     })
     http.HandleFunc("/trade", trade)
     http.HandleFunc("/markets/", getPrice) // will handle /markets/{id}/price
+    http.HandleFunc("/memes", createMeme)
+    http.HandleFunc("/markets/", func(w http.ResponseWriter, r *http.Request) {
+        if strings.HasSuffix(r.URL.Path, "/memes") {
+            getMemesByMarket(w, r)
+        } else if strings.HasSuffix(r.URL.Path, "/price") {
+            getPrice(w, r)
+        } else {
+            http.NotFound(w, r)
+        }
+    })
+    http.HandleFunc("/attention", addAttention)
 
     log.Println("Server starting on :8080")
     log.Fatal(http.ListenAndServe(":8080", nil))
