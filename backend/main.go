@@ -269,18 +269,36 @@ func trade(w http.ResponseWriter, r *http.Request) {
 
 func getPrice(w http.ResponseWriter, r *http.Request) {
 	idStr := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/markets/"), "/price")
-	id, _ := strconv.Atoi(idStr)
+
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		http.Error(w, "invalid market id", 400)
+		return
+	}
 
 	var x, y float64
-	err := db.DB.QueryRow(...).Scan(&x, &y)
-	if err == sql.ErrNoRows {
-    	http.Error(w, "market not found", 404)
-    	return
-	}
-	db.DB.QueryRow("SELECT x_reserve,y_reserve FROM markets WHERE id=$1", id).Scan(&x, &y)
-	
+	err = db.DB.QueryRow(
+		"SELECT x_reserve, y_reserve FROM markets WHERE id=$1",
+		id,
+	).Scan(&x, &y)
 
-	json.NewEncoder(w).Encode(map[string]float64{"price": y / x})
+	if err == sql.ErrNoRows {
+		http.Error(w, "market not found", 404)
+		return
+	}
+	if err != nil {
+		http.Error(w, "db error", 500)
+		return
+	}
+
+	if x == 0 {
+		http.Error(w, "invalid pool state", 500)
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]float64{
+		"price": y / x,
+	})
 }
 
 // -------------------- MEMES --------------------
@@ -292,49 +310,81 @@ func createMeme(w http.ResponseWriter, r *http.Request) {
 		ImageURL  string `json:"image_url"`
 		Caption   string `json:"caption"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json", 400)
+		return
+	}
+
+	if req.MarketID <= 0 || req.ImageURL == "" {
+		http.Error(w, "invalid input", 400)
+		return
+	}
+
+	//validate market exists
+	var exists bool
+	err := db.DB.QueryRow(
+		"SELECT EXISTS(SELECT 1 FROM markets WHERE id=$1)",
+		req.MarketID,
+	).Scan(&exists)
+
+	if err != nil || !exists {
+		http.Error(w, "market not found", 400)
+		return
+	}
 
 	hash := models.ComputeContentHash(req.ImageURL, req.Caption)
 
 	var id int
-	err := db.DB.QueryRow(
+	err = db.DB.QueryRow(
 		`INSERT INTO memes(creator_id,market_id,image_url,caption,content_hash)
 		 VALUES($1,$2,$3,$4,$5) RETURNING id`,
 		req.CreatorID, req.MarketID, req.ImageURL, req.Caption, hash,
 	).Scan(&id)
 
 	if err != nil {
-		http.Error(w, "duplicate or DB error", 500)
+		if strings.Contains(err.Error(), "content_hash") {
+			http.Error(w, "duplicate meme", 409)
+			return
+		}
+		http.Error(w, "db error", 500)
 		return
 	}
 
 	json.NewEncoder(w).Encode(map[string]int{"id": id})
 }
-
 func getMemesByMarket(w http.ResponseWriter, r *http.Request) {
 	idStr := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/markets/"), "/memes")
-	id, _ := strconv.Atoi(idStr)
-	rows, err := db.DB.Query(...)
+
+	id, err := strconv.Atoi(idStr)
 	if err != nil {
-    	http.Error(w, "DB error", 500)
-    	return
+		http.Error(w, "invalid market id", 400)
+		return
 	}
-	rows, _ := db.DB.Query(
-		`SELECT id,creator_id,image_url,caption,created_at FROM memes WHERE market_id=$1`,
+
+	rows, err := db.DB.Query(
+		`SELECT id, creator_id, image_url, caption, created_at 
+		 FROM memes WHERE market_id=$1 ORDER BY created_at DESC`,
 		id,
 	)
+	if err != nil {
+		http.Error(w, "db error", 500)
+		return
+	}
 	defer rows.Close()
 
 	var memes []models.Meme
 	for rows.Next() {
 		var m models.Meme
-		rows.Scan(&m.ID, &m.CreatorID, &m.ImageURL, &m.Caption, &m.CreatedAt)
+		if err := rows.Scan(&m.ID, &m.CreatorID, &m.ImageURL, &m.Caption, &m.CreatedAt); err != nil {
+			http.Error(w, "scan error", 500)
+			return
+		}
 		memes = append(memes, m)
 	}
 
 	json.NewEncoder(w).Encode(memes)
 }
-
 // -------------------- ATTENTION --------------------
 
 func addAttention(w http.ResponseWriter, r *http.Request) {
