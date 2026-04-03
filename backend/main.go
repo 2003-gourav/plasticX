@@ -11,6 +11,7 @@ import (
 
     "github.com/2003-gourav/plasticX/backend/amm"
     "github.com/2003-gourav/plasticX/backend/db"
+    "github.com/2003-gourav/plasticX/backend/models"
 )
 
 type Market struct {
