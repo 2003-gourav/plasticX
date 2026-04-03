@@ -70,6 +70,7 @@ func main() {
     http.HandleFunc("/trade", trade)
     http.HandleFunc("/memes", createMeme)
     http.HandleFunc("/attention", addAttention)
+    http.HandleFunc("/memes/", getMemeStats)  
     http.HandleFunc("/markets/", func(w http.ResponseWriter, r *http.Request) {
         path := r.URL.Path
 
@@ -451,4 +452,37 @@ func addAttention(w http.ResponseWriter, r *http.Request) {
     }
     w.WriteHeader(http.StatusOK)
     json.NewEncoder(w).Encode(map[string]string{"status": "recorded"})
+}
+
+func getMemeStats(w http.ResponseWriter, r *http.Request) {
+    // Path: /memes/{id}/stats
+    path := strings.TrimPrefix(r.URL.Path, "/memes/")
+    idStr := strings.TrimSuffix(path, "/stats")
+    memeID, err := strconv.Atoi(idStr)
+    if err != nil {
+        http.Error(w, "Invalid meme ID", http.StatusBadRequest)
+        return
+    }
+
+    var totalViews, totalUnique, totalReposts, totalDerivatives int
+    err = db.DB.QueryRow(`
+        SELECT COALESCE(SUM(views), 0), COALESCE(SUM(unique_views), 0), 
+               COALESCE(SUM(reposts), 0), COALESCE(SUM(derivatives), 0)
+        FROM meme_attention
+        WHERE meme_id = $1`, memeID,
+    ).Scan(&totalViews, &totalUnique, &totalReposts, &totalDerivatives)
+    if err != nil {
+        log.Printf("Stats query error: %v", err)
+        http.Error(w, "Database error", http.StatusInternalServerError)
+        return
+    }
+
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(map[string]interface{}{
+        "meme_id":      memeID,
+        "total_views":  totalViews,
+        "unique_views": totalUnique,
+        "total_reposts": totalReposts,
+        "derivatives":  totalDerivatives,
+    })
 }
