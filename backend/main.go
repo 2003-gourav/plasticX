@@ -325,3 +325,108 @@ func getPrice(w http.ResponseWriter, r *http.Request) {
     w.Header().Set("Content-Type", "application/json")
     json.NewEncoder(w).Encode(map[string]float64{"price": price})
 }
+// POST /memes
+func createMeme(w http.ResponseWriter, r *http.Request) {
+    var req struct {
+        CreatorID string `json:"creator_id"`
+        MarketID  int    `json:"market_id"`
+        ImageURL  string `json:"image_url"`
+        Caption   string `json:"caption"`
+    }
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        http.Error(w, "Invalid JSON", http.StatusBadRequest)
+        return
+    }
+
+    // Validate market exists
+    var exists bool
+    err := db.DB.QueryRow("SELECT EXISTS(SELECT 1 FROM markets WHERE id = $1)", req.MarketID).Scan(&exists)
+    if err != nil || !exists {
+        http.Error(w, "Market not found", http.StatusBadRequest)
+        return
+    }
+
+    hash := computeContentHash(req.ImageURL, req.Caption)
+
+    var memeID int
+    err = db.DB.QueryRow(`
+        INSERT INTO memes(creator_id, market_id, image_url, caption, content_hash)
+        VALUES($1, $2, $3, $4, $5) RETURNING id`,
+        req.CreatorID, req.MarketID, req.ImageURL, req.Caption, hash,
+    ).Scan(&memeID)
+    if err != nil {
+        log.Printf("Insert meme error: %v", err)
+        http.Error(w, "Database error (maybe duplicate hash)", http.StatusInternalServerError)
+        return
+    }
+
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(http.StatusCreated)
+    json.NewEncoder(w).Encode(map[string]int{"id": memeID})
+}
+
+// GET /markets/{id}/memes
+func getMemesByMarket(w http.ResponseWriter, r *http.Request) {
+    path := strings.TrimPrefix(r.URL.Path, "/markets/")
+    idStr := strings.TrimSuffix(path, "/memes")
+    marketID, err := strconv.Atoi(idStr)
+    if err != nil {
+        http.Error(w, "Invalid market ID", http.StatusBadRequest)
+        return
+    }
+
+    rows, err := db.DB.Query(`
+        SELECT id, creator_id, image_url, caption, created_at
+        FROM memes WHERE market_id = $1 ORDER BY created_at DESC`, marketID)
+    if err != nil {
+        http.Error(w, "Database error", http.StatusInternalServerError)
+        return
+    }
+    defer rows.Close()
+
+    var memes []Meme
+    for rows.Next() {
+        var m Meme
+        if err := rows.Scan(&m.ID, &m.CreatorID, &m.ImageURL, &m.Caption, &m.CreatedAt); err != nil {
+            http.Error(w, "Scan error", http.StatusInternalServerError)
+            return
+        }
+        memes = append(memes, m)
+    }
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(memes)
+}
+
+// POST /attention (increment raw metrics for a meme)
+func addAttention(w http.ResponseWriter, r *http.Request) {
+    var req struct {
+        MemeID     int `json:"meme_id"`
+        Views      int `json:"views"`
+        UniqueViews int `json:"unique_views"`
+        Reposts    int `json:"reposts"`
+        Derivatives int `json:"derivatives"`
+    }
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        http.Error(w, "Invalid JSON", http.StatusBadRequest)
+        return
+    }
+
+    // Upsert: increment counts for current timestamp (simplified – you may want to aggregate by hour)
+    _, err := db.DB.Exec(`
+        INSERT INTO meme_attention (meme_id, views, unique_views, reposts, derivatives, timestamp)
+        VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
+        ON CONFLICT (meme_id, timestamp) DO UPDATE SET
+            views = meme_attention.views + EXCLUDED.views,
+            unique_views = meme_attention.unique_views + EXCLUDED.unique_views,
+            reposts = meme_attention.reposts + EXCLUDED.reposts,
+            derivatives = meme_attention.derivatives + EXCLUDED.derivatives`,
+        req.MemeID, req.Views, req.UniqueViews, req.Reposts, req.Derivatives,
+    )
+    if err != nil {
+        log.Printf("Attention update error: %v", err)
+        http.Error(w, "Database error", http.StatusInternalServerError)
+        return
+    }
+    w.WriteHeader(http.StatusOK)
+    json.NewEncoder(w).Encode(map[string]string{"status": "recorded"})
+}
