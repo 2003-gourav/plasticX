@@ -54,6 +54,8 @@ func main() {
 
     http.HandleFunc("/", home)
     http.HandleFunc("/health", health)
+
+    // /markets (GET, POST)
     http.HandleFunc("/markets", func(w http.ResponseWriter, r *http.Request) {
         switch r.Method {
         case http.MethodGet:
@@ -64,19 +66,24 @@ func main() {
             http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
         }
     })
+
     http.HandleFunc("/trade", trade)
-    http.HandleFunc("/markets/", getPrice) // will handle /markets/{id}/price
     http.HandleFunc("/memes", createMeme)
+    http.HandleFunc("/attention", addAttention)
     http.HandleFunc("/markets/", func(w http.ResponseWriter, r *http.Request) {
-        if strings.HasSuffix(r.URL.Path, "/memes") {
+        path := r.URL.Path
+
+        switch {
+        case strings.HasSuffix(path, "/memes"):
             getMemesByMarket(w, r)
-        } else if strings.HasSuffix(r.URL.Path, "/price") {
+
+        case strings.HasSuffix(path, "/price"):
             getPrice(w, r)
-        } else {
+
+        default:
             http.NotFound(w, r)
         }
     })
-    http.HandleFunc("/attention", addAttention)
 
     log.Println("Server starting on :8080")
     log.Fatal(http.ListenAndServe(":8080", nil))
