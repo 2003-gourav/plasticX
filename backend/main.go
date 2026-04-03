@@ -505,17 +505,21 @@ func getMemeEvents(w http.ResponseWriter, r *http.Request) {
         }
     }
 
-    // Build query with correct column names
-    query := `SELECT event_id, event_type, COALESCE(user_id, '') as user_id, timestamp 
-              FROM attention_events 
-              WHERE meme_id = $1`
-    args := []interface{}{memeID}
+    var query string
+    var args []interface{}
     if eventType != "" {
-        query += " AND event_type = $2"
-        args = append(args, eventType)
+        query = `SELECT event_id, event_type, COALESCE(user_id, '') as user_id, timestamp 
+                 FROM attention_events 
+                 WHERE meme_id = $1 AND event_type = $2 
+                 ORDER BY timestamp DESC LIMIT $3`
+        args = []interface{}{memeID, eventType, limit}
+    } else {
+        query = `SELECT event_id, event_type, COALESCE(user_id, '') as user_id, timestamp 
+                 FROM attention_events 
+                 WHERE meme_id = $1 
+                 ORDER BY timestamp DESC LIMIT $2`
+        args = []interface{}{memeID, limit}
     }
-    query += " ORDER BY timestamp DESC LIMIT $3"
-    args = append(args, limit)
 
     rows, err := db.DB.Query(query, args...)
     if err != nil {
@@ -548,8 +552,7 @@ func getMemeEvents(w http.ResponseWriter, r *http.Request) {
 
     w.Header().Set("Content-Type", "application/json")
     json.NewEncoder(w).Encode(events)
-}// -------------------- ATTENTION EVENTS (Week 2) --------------------
-
+}
 func recordAttentionEvent(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
