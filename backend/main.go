@@ -174,6 +174,14 @@ func trade(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid JSON", 400)
 		return
 	}
+	if req.Direction != "buy" && req.Direction != "sell" {
+    	http.Error(w, "invalid direction", 400)
+    	return
+	}
+	if req.Amount <= 0 {
+    	http.Error(w, "amount must be positive", 400)
+    	return
+	}
 
 	tx, err := db.DB.Begin()
 	if err != nil {
