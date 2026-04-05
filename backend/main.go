@@ -82,8 +82,104 @@ func main() {
 
 	http.HandleFunc("/attention/event", recordAttentionEvent) // Week 2 event endpoint
 
+	http.HandleFunc("/top-memes", getTopMemesByVelocity)
+
+	go func() {
+		for {
+			refreshMemeSignals()
+			time.Sleep(60 * time.Second)
+		}
+	}()
+
 	log.Println("Server running on :8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
+}
+
+func refreshMemeSignals() {
+	query := `
+		WITH last_hour AS (
+			SELECT 
+				meme_id,
+				COUNT(*) FILTER (WHERE event_type = 'view') AS views,
+				COUNT(*) FILTER (WHERE event_type = 'repost') AS reposts,
+				COUNT(*) FILTER (WHERE event_type = 'derivative') AS derivatives
+			FROM attention_events
+			WHERE timestamp > NOW() - INTERVAL '1 hour'
+			GROUP BY meme_id
+		)
+		INSERT INTO meme_signals (meme_id, views_1h, reposts_1h, derivatives_1h, velocity_1h, updated_at)
+		SELECT 
+			meme_id,
+			views,
+			reposts,
+			derivatives,
+			views::double precision AS velocity_1h,
+			NOW()
+		FROM last_hour
+		ON CONFLICT (meme_id) DO UPDATE SET
+			views_1h = EXCLUDED.views_1h,
+			reposts_1h = EXCLUDED.reposts_1h,
+			derivatives_1h = EXCLUDED.derivatives_1h,
+			velocity_1h = EXCLUDED.velocity_1h,
+			updated_at = NOW()
+	`
+	_, err := db.DB.Exec(query)
+	if err != nil {
+		log.Printf("Refresh meme signals error: %v", err)
+	} else {
+		log.Println("Meme signals refreshed")
+	}
+}
+
+func getTopMemesByVelocity(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	limit := 10
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 && parsed <= 50 {
+			limit = parsed
+		}
+	}
+
+	rows, err := db.DB.Query(`
+		SELECT m.id, m.caption, m.image_url, ms.views_1h, ms.velocity_1h, ms.reposts_1h, ms.derivatives_1h
+		FROM meme_signals ms
+		JOIN memes m ON ms.meme_id = m.id
+		ORDER BY ms.velocity_1h DESC
+		LIMIT $1
+	`, limit)
+	if err != nil {
+		http.Error(w, "DB error", 500)
+		return
+	}
+	defer rows.Close()
+
+	var result []map[string]interface{}
+	for rows.Next() {
+		var id int
+		var caption, imageURL string
+		var views, reposts, derivatives int
+		var velocity float64
+		if err := rows.Scan(&id, &caption, &imageURL, &views, &velocity, &reposts, &derivatives); err != nil {
+			http.Error(w, "Scan error", 500)
+			return
+		}
+		result = append(result, map[string]interface{}{
+			"meme_id":        id,
+			"caption":        caption,
+			"image_url":      imageURL,
+			"views_1h":       views,
+			"velocity_1h":    velocity,
+			"reposts_1h":     reposts,
+			"derivatives_1h": derivatives,
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
 }
 
 // -------------------- BASIC HANDLERS --------------------
