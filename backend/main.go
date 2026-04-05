@@ -42,6 +42,24 @@ type TradeResponse struct {
 	NewPrice  float64 `json:"new_price"`
 }
 
+// parseWindow maps query ?window= to a PostgreSQL INTERVAL literal (whitelist only; safe for SQL embedding).
+func parseWindow(window string) (string, error) {
+	switch window {
+	case "5m":
+		return "5 minutes", nil
+	case "1h":
+		return "1 hour", nil
+	case "6h":
+		return "6 hours", nil
+	case "24h":
+		return "24 hours", nil
+	case "":
+		return "1 hour", nil
+	default:
+		return "1 hour", nil
+	}
+}
+
 // -------------------- MAIN --------------------
 
 func main() {
@@ -162,6 +180,8 @@ func marketsSubroutes(w http.ResponseWriter, r *http.Request) {
 		getMarketStats(w, r)
 	case strings.HasSuffix(path, "/signals"):
 		getMarketSignals(w, r)
+	case strings.HasSuffix(path, "/trending"):
+		getMarketTrending(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -296,6 +316,69 @@ func getTopMemes(w http.ResponseWriter, r *http.Request) {
 			"id": id, "caption": caption, sortBy: val,
 		})
 	}
+	json.NewEncoder(w).Encode(result)
+}
+
+func getMarketTrending(w http.ResponseWriter, r *http.Request) {
+	idStr := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/markets/"), "/trending")
+	marketID, err := strconv.Atoi(idStr)
+	if err != nil {
+		http.Error(w, "invalid market id", 400)
+		return
+	}
+
+	windowParam := r.URL.Query().Get("window")
+	interval, _ := parseWindow(windowParam)
+
+	limit := 10
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if parsed, _ := strconv.Atoi(l); parsed > 0 && parsed <= 50 {
+			limit = parsed
+		}
+	}
+
+	sortBy := r.URL.Query().Get("sort")
+	eventType := "view"
+	switch sortBy {
+	case "reposts":
+		eventType = "repost"
+	case "derivatives":
+		eventType = "derivative"
+	default:
+		sortBy = "views"
+		eventType = "view"
+	}
+
+	query := `
+		SELECT m.id, m.caption, COUNT(*) AS count
+		FROM memes m
+		JOIN attention_events ae ON m.id = ae.meme_id
+		WHERE m.market_id = $1 AND ae.event_type = $2 AND ae.timestamp > NOW() - INTERVAL '` + interval + `'
+		GROUP BY m.id, m.caption
+		ORDER BY count DESC
+		LIMIT $3`
+	rows, err := db.DB.Query(query, marketID, eventType, limit)
+	if err != nil {
+		http.Error(w, "DB error", 500)
+		return
+	}
+	defer rows.Close()
+
+	var result []map[string]interface{}
+	for rows.Next() {
+		var id int
+		var caption string
+		var count int
+		if err := rows.Scan(&id, &caption, &count); err != nil {
+			http.Error(w, "Scan error", 500)
+			return
+		}
+		result = append(result, map[string]interface{}{
+			"meme_id": id, "caption": caption, sortBy: count,
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)
 }
 
@@ -503,6 +586,10 @@ func memesSubroutes(w http.ResponseWriter, r *http.Request) {
 		getMemeEvents(w, r)
 	} else if strings.HasSuffix(path, "/signals") {
 		getMemeSignals(w, r)
+	} else if strings.HasSuffix(path, "/attention") {
+		getMemeAttentionWindow(w, r)
+	} else if strings.HasSuffix(path, "/velocity") {
+		getMemeVelocity(w, r)
 	} else {
 		http.NotFound(w, r)
 	}
@@ -570,6 +657,109 @@ func getMemeSignals(w http.ResponseWriter, r *http.Request) {
 		"repost_ratio":     repostRatio,
 		"derivative_ratio": derivativeRatio,
 		"virality_score":   viralityScore,
+	})
+}
+
+func getMemeAttentionWindow(w http.ResponseWriter, r *http.Request) {
+	idStr := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/memes/"), "/attention")
+	memeID, err := strconv.Atoi(idStr)
+	if err != nil {
+		http.Error(w, "invalid meme id", 400)
+		return
+	}
+
+	windowParam := r.URL.Query().Get("window")
+	interval, err := parseWindow(windowParam)
+	if err != nil {
+		interval = "1 hour"
+	}
+
+	var views, uniqueViews, reposts, derivatives int
+	query := `
+		SELECT 
+			COUNT(*) FILTER (WHERE event_type = 'view'),
+			COUNT(*) FILTER (WHERE event_type = 'unique_view'),
+			COUNT(*) FILTER (WHERE event_type = 'repost'),
+			COUNT(*) FILTER (WHERE event_type = 'derivative')
+		FROM attention_events
+		WHERE meme_id = $1 AND timestamp > NOW() - INTERVAL '` + interval + `'`
+
+	err = db.DB.QueryRow(query, memeID).Scan(&views, &uniqueViews, &reposts, &derivatives)
+	if err != nil {
+		http.Error(w, "DB error", 500)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"meme_id":      memeID,
+		"window":       windowParam,
+		"views":        views,
+		"unique_views": uniqueViews,
+		"reposts":      reposts,
+		"derivatives":  derivatives,
+	})
+}
+
+func getMemeVelocity(w http.ResponseWriter, r *http.Request) {
+	idStr := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/memes/"), "/velocity")
+	memeID, err := strconv.Atoi(idStr)
+	if err != nil {
+		http.Error(w, "invalid meme id", 400)
+		return
+	}
+
+	windowParam := r.URL.Query().Get("window")
+	interval, _ := parseWindow(windowParam)
+	if interval == "" {
+		interval = "1 hour"
+	}
+
+	query := `
+		WITH current AS (
+			SELECT 
+				COUNT(*) FILTER (WHERE event_type = 'view') AS views,
+				COUNT(*) FILTER (WHERE event_type = 'repost') AS reposts,
+				COUNT(*) FILTER (WHERE event_type = 'derivative') AS derivatives
+			FROM attention_events
+			WHERE meme_id = $1 AND timestamp > NOW() - INTERVAL '` + interval + `'
+		),
+		previous AS (
+			SELECT 
+				COUNT(*) FILTER (WHERE event_type = 'view') AS views,
+				COUNT(*) FILTER (WHERE event_type = 'repost') AS reposts,
+				COUNT(*) FILTER (WHERE event_type = 'derivative') AS derivatives
+			FROM attention_events
+			WHERE meme_id = $1 
+				AND timestamp > NOW() - (2 * INTERVAL '` + interval + `')
+				AND timestamp <= NOW() - INTERVAL '` + interval + `'
+		)
+		SELECT 
+			COALESCE(c.views, 0), COALESCE(c.reposts, 0), COALESCE(c.derivatives, 0),
+			COALESCE(p.views, 0), COALESCE(p.reposts, 0), COALESCE(p.derivatives, 0)
+		FROM current c, previous p`
+
+	var viewsNow, repostsNow, derivativesNow int
+	var viewsPrev, repostsPrev, derivativesPrev int
+	err = db.DB.QueryRow(query, memeID).Scan(&viewsNow, &repostsNow, &derivativesNow, &viewsPrev, &repostsPrev, &derivativesPrev)
+	if err != nil {
+		http.Error(w, "DB error", 500)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"meme_id":                   memeID,
+		"window":                    windowParam,
+		"views_last_hour":           viewsNow,
+		"views_previous_hour":       viewsPrev,
+		"views_velocity":            viewsNow - viewsPrev,
+		"reposts_last_hour":         repostsNow,
+		"reposts_previous_hour":     repostsPrev,
+		"reposts_velocity":          repostsNow - repostsPrev,
+		"derivatives_last_hour":     derivativesNow,
+		"derivatives_previous_hour": derivativesPrev,
+		"derivatives_velocity":      derivativesNow - derivativesPrev,
 	})
 }
 
