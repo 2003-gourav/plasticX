@@ -20,7 +20,7 @@ type MemeSignal struct {
 	Velocity1h     float64   `json:"velocity_1h" db:"velocity_1h"`
 	Momentum       float64   `json:"momentum" db:"momentum"`
 	AttentionScore float64   `json:"attention_score" db:"attention_score"`
-	UpdatedAt      time.Time `json:"updated_at" db:"updated_at"`
+	UpdatedAt      time.Time `json:"updated_at,omitempty" db:"updated_at"`
 }
 
 // MarketSignal is aggregated market-level signal row (refreshed periodically).
@@ -30,5 +30,5 @@ type MarketSignal struct {
 	TotalViews1h        int       `json:"total_views_1h" db:"total_views_1h"`
 	MarketVelocity      float64   `json:"market_velocity" db:"market_velocity"`
 	MarketMomentum      float64   `json:"market_momentum" db:"market_momentum"`
-	UpdatedAt           time.Time `json:"updated_at" db:"updated_at"`
+	UpdatedAt           time.Time `json:"updated_at,omitempty" db:"updated_at"`
 }

@@ -87,6 +87,7 @@ func main() {
 	go func() {
 		for {
 			refreshMemeSignals()
+			refreshMarketSignals()
 			time.Sleep(60 * time.Second)
 		}
 	}()
@@ -100,34 +101,115 @@ func refreshMemeSignals() {
 		WITH last_hour AS (
 			SELECT 
 				meme_id,
-				COUNT(*) FILTER (WHERE event_type = 'view') AS views,
-				COUNT(*) FILTER (WHERE event_type = 'repost') AS reposts,
-				COUNT(*) FILTER (WHERE event_type = 'derivative') AS derivatives
+				COUNT(*) FILTER (WHERE event_type = 'view') AS views_1h,
+				COUNT(*) FILTER (WHERE event_type = 'repost') AS reposts_1h,
+				COUNT(*) FILTER (WHERE event_type = 'derivative') AS derivatives_1h
 			FROM attention_events
 			WHERE timestamp > NOW() - INTERVAL '1 hour'
 			GROUP BY meme_id
+		),
+		last_24h AS (
+			SELECT 
+				meme_id,
+				COUNT(*) FILTER (WHERE event_type = 'view') AS views_24h
+			FROM attention_events
+			WHERE timestamp > NOW() - INTERVAL '24 hours'
+			GROUP BY meme_id
+		),
+		combined AS (
+			SELECT 
+				COALESCE(lh.meme_id, l24.meme_id) AS meme_id,
+				COALESCE(lh.views_1h, 0) AS views_1h,
+				COALESCE(lh.reposts_1h, 0) AS reposts_1h,
+				COALESCE(lh.derivatives_1h, 0) AS derivatives_1h,
+				COALESCE(l24.views_24h, 0) AS views_24h,
+				COALESCE(lh.views_1h, 0)::double precision AS velocity_1h
+			FROM last_hour lh
+			FULL OUTER JOIN last_24h l24 ON lh.meme_id = l24.meme_id
 		)
-		INSERT INTO meme_signals (meme_id, views_1h, reposts_1h, derivatives_1h, velocity_1h, updated_at)
+		INSERT INTO meme_signals (meme_id, views_1h, views_24h, reposts_1h, derivatives_1h, velocity_1h, momentum, attention_score, updated_at)
 		SELECT 
-			meme_id,
-			views,
-			reposts,
-			derivatives,
-			views::double precision AS velocity_1h,
+			c.meme_id,
+			c.views_1h,
+			c.views_24h,
+			c.reposts_1h,
+			c.derivatives_1h,
+			c.velocity_1h,
+			COALESCE(0.3 * c.velocity_1h + 0.7 * ms.momentum, c.velocity_1h) AS momentum,
+			COALESCE(
+				(c.views_1h::double precision * 1.0 + c.reposts_1h::double precision * 3.0 + c.derivatives_1h::double precision * 5.0) *
+				(0.3 * c.velocity_1h + 0.7 * COALESCE(ms.momentum, c.velocity_1h)),
+				(c.views_1h::double precision * 1.0 + c.reposts_1h::double precision * 3.0 + c.derivatives_1h::double precision * 5.0) * c.velocity_1h
+			) AS attention_score,
 			NOW()
-		FROM last_hour
+		FROM combined c
+		LEFT JOIN meme_signals ms ON c.meme_id = ms.meme_id
 		ON CONFLICT (meme_id) DO UPDATE SET
 			views_1h = EXCLUDED.views_1h,
+			views_24h = EXCLUDED.views_24h,
 			reposts_1h = EXCLUDED.reposts_1h,
 			derivatives_1h = EXCLUDED.derivatives_1h,
 			velocity_1h = EXCLUDED.velocity_1h,
-			updated_at = NOW()
+			momentum = EXCLUDED.momentum,
+			attention_score = EXCLUDED.attention_score,
+			updated_at = EXCLUDED.updated_at
 	`
 	_, err := db.DB.Exec(query)
 	if err != nil {
 		log.Printf("Refresh meme signals error: %v", err)
+		return
+	}
+
+	// Zero rows for memes with no attention_events in the last 24h (avoids stale views_24h / scores).
+	zeroQuery := `
+		UPDATE meme_signals ms
+		SET 
+			views_1h = 0,
+			views_24h = 0,
+			reposts_1h = 0,
+			derivatives_1h = 0,
+			velocity_1h = 0,
+			momentum = 0,
+			attention_score = 0,
+			updated_at = NOW()
+		WHERE NOT EXISTS (
+			SELECT 1 FROM attention_events ae
+			WHERE ae.meme_id = ms.meme_id
+			AND ae.timestamp > NOW() - INTERVAL '24 hours'
+		)
+	`
+	if _, err := db.DB.Exec(zeroQuery); err != nil {
+		log.Printf("Zero stale meme_signals error: %v", err)
+	}
+
+	log.Println("Meme signals refreshed (views_1h, views_24h, velocity, momentum, attention_score)")
+}
+
+func refreshMarketSignals() {
+	query := `
+		INSERT INTO market_signals (market_id, total_attention_score, total_views_1h, market_velocity, market_momentum, updated_at)
+		SELECT 
+			m.market_id,
+			COALESCE(SUM(ms.attention_score), 0) AS total_attention_score,
+			COALESCE(SUM(ms.views_1h), 0) AS total_views_1h,
+			COALESCE(SUM(ms.velocity_1h), 0) AS market_velocity,
+			COALESCE(AVG(ms.momentum), 0) AS market_momentum,
+			NOW()
+		FROM memes m
+		LEFT JOIN meme_signals ms ON m.id = ms.meme_id
+		GROUP BY m.market_id
+		ON CONFLICT (market_id) DO UPDATE SET
+			total_attention_score = EXCLUDED.total_attention_score,
+			total_views_1h = EXCLUDED.total_views_1h,
+			market_velocity = EXCLUDED.market_velocity,
+			market_momentum = EXCLUDED.market_momentum,
+			updated_at = EXCLUDED.updated_at
+	`
+	_, err := db.DB.Exec(query)
+	if err != nil {
+		log.Printf("Refresh market signals error: %v", err)
 	} else {
-		log.Println("Meme signals refreshed")
+		log.Println("Market signals refreshed")
 	}
 }
 
@@ -145,10 +227,11 @@ func getTopMemesByVelocity(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := db.DB.Query(`
-		SELECT m.id, m.caption, m.image_url, ms.views_1h, ms.velocity_1h, ms.reposts_1h, ms.derivatives_1h
+		SELECT m.id, m.caption, m.image_url, ms.views_1h, ms.velocity_1h, ms.reposts_1h, ms.derivatives_1h,
+		       ms.momentum, ms.attention_score
 		FROM meme_signals ms
 		JOIN memes m ON ms.meme_id = m.id
-		ORDER BY ms.velocity_1h DESC
+		ORDER BY ms.attention_score DESC NULLS LAST
 		LIMIT $1
 	`, limit)
 	if err != nil {
@@ -162,19 +245,21 @@ func getTopMemesByVelocity(w http.ResponseWriter, r *http.Request) {
 		var id int
 		var caption, imageURL string
 		var views, reposts, derivatives int
-		var velocity float64
-		if err := rows.Scan(&id, &caption, &imageURL, &views, &velocity, &reposts, &derivatives); err != nil {
+		var velocity, momentum, attention float64
+		if err := rows.Scan(&id, &caption, &imageURL, &views, &velocity, &reposts, &derivatives, &momentum, &attention); err != nil {
 			http.Error(w, "Scan error", 500)
 			return
 		}
 		result = append(result, map[string]interface{}{
-			"meme_id":        id,
-			"caption":        caption,
-			"image_url":      imageURL,
-			"views_1h":       views,
-			"velocity_1h":    velocity,
-			"reposts_1h":     reposts,
-			"derivatives_1h": derivatives,
+			"meme_id":          id,
+			"caption":          caption,
+			"image_url":        imageURL,
+			"views_1h":         views,
+			"velocity_1h":      velocity,
+			"reposts_1h":       reposts,
+			"derivatives_1h":   derivatives,
+			"momentum":         momentum,
+			"attention_score":  attention,
 		})
 	}
 
@@ -373,31 +458,31 @@ func getMarketSignals(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var ms models.MarketSignal
+	var signal models.MarketSignal
 	err = db.DB.QueryRow(`
-		SELECT market_id, total_attention_score, total_views_1h, market_velocity, market_momentum, updated_at
-		FROM market_signals WHERE market_id = $1
-	`, marketID).Scan(&ms.MarketID, &ms.TotalAttentionScore, &ms.TotalViews1h,
-		&ms.MarketVelocity, &ms.MarketMomentum, &ms.UpdatedAt)
-	if err == sql.ErrNoRows {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"market_id":             marketID,
-			"total_attention_score": 0.0,
-			"total_views_1h":        0,
-			"market_velocity":       0.0,
-			"market_momentum":       0.0,
-			"updated_at":            nil,
-		})
-		return
-	}
-	if err != nil {
+		SELECT 
+			COALESCE(total_attention_score, 0),
+			COALESCE(total_views_1h, 0),
+			COALESCE(market_velocity, 0),
+			COALESCE(market_momentum, 0),
+			updated_at
+		FROM market_signals
+		WHERE market_id = $1
+	`, marketID).Scan(
+		&signal.TotalAttentionScore, &signal.TotalViews1h,
+		&signal.MarketVelocity, &signal.MarketMomentum, &signal.UpdatedAt,
+	)
+	if err != nil && err != sql.ErrNoRows {
 		http.Error(w, "DB error", 500)
 		return
 	}
+	if err == sql.ErrNoRows {
+		signal = models.MarketSignal{MarketID: marketID}
+	}
+	signal.MarketID = marketID
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(ms)
+	json.NewEncoder(w).Encode(signal)
 }
 
 // getMarketInsights returns lifetime aggregates from meme_attention_stats plus ratio-style scores (not materialized signals).
@@ -804,35 +889,34 @@ func getMemeSignals(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var ms models.MemeSignal
+	var signal models.MemeSignal
 	err = db.DB.QueryRow(`
-		SELECT meme_id, views_1h, views_24h, reposts_1h, derivatives_1h,
-		       velocity_1h, momentum, attention_score, updated_at
-		FROM meme_signals WHERE meme_id = $1
-	`, memeID).Scan(&ms.MemeID, &ms.Views1h, &ms.Views24h, &ms.Reposts1h, &ms.Derivatives1h,
-		&ms.Velocity1h, &ms.Momentum, &ms.AttentionScore, &ms.UpdatedAt)
-	if err == sql.ErrNoRows {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"meme_id":          memeID,
-			"views_1h":         0,
-			"views_24h":        0,
-			"reposts_1h":       0,
-			"derivatives_1h":   0,
-			"velocity_1h":      0.0,
-			"momentum":         0.0,
-			"attention_score":  0.0,
-			"updated_at":       nil,
-		})
-		return
-	}
-	if err != nil {
+		SELECT 
+			COALESCE(views_1h, 0),
+			COALESCE(views_24h, 0),
+			COALESCE(reposts_1h, 0),
+			COALESCE(derivatives_1h, 0),
+			COALESCE(velocity_1h, 0),
+			COALESCE(momentum, 0),
+			COALESCE(attention_score, 0),
+			updated_at
+		FROM meme_signals
+		WHERE meme_id = $1
+	`, memeID).Scan(
+		&signal.Views1h, &signal.Views24h, &signal.Reposts1h, &signal.Derivatives1h,
+		&signal.Velocity1h, &signal.Momentum, &signal.AttentionScore, &signal.UpdatedAt,
+	)
+	if err != nil && err != sql.ErrNoRows {
 		http.Error(w, "DB error", 500)
 		return
 	}
+	if err == sql.ErrNoRows {
+		signal = models.MemeSignal{MemeID: memeID}
+	}
+	signal.MemeID = memeID
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(ms)
+	json.NewEncoder(w).Encode(signal)
 }
 
 // getMemeInsights returns lifetime stats from meme_attention_stats plus ratio-style scores (weights: view 1, repost 3, derivative 5).
