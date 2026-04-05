@@ -160,6 +160,8 @@ func marketsSubroutes(w http.ResponseWriter, r *http.Request) {
 		getTopMemes(w, r)
 	case strings.HasSuffix(path, "/stats"):
 		getMarketStats(w, r)
+	case strings.HasSuffix(path, "/signals"):
+		getMarketSignals(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -215,6 +217,46 @@ func getMarketAttention(w http.ResponseWriter, r *http.Request) {
 		"unique_views": uniqueViews,
 		"reposts":     reposts,
 		"derivatives": derivatives,
+	})
+}
+
+func getMarketSignals(w http.ResponseWriter, r *http.Request) {
+	idStr := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/markets/"), "/signals")
+	marketID, err := strconv.Atoi(idStr)
+	if err != nil {
+		http.Error(w, "invalid market id", 400)
+		return
+	}
+
+	var totalViews, totalUnique, totalReposts, totalDerivatives int
+	err = db.DB.QueryRow(`
+		SELECT COALESCE(SUM(ms.views),0), COALESCE(SUM(ms.unique_views),0),
+		       COALESCE(SUM(ms.reposts),0), COALESCE(SUM(ms.derivatives),0)
+		FROM memes m
+		JOIN meme_attention_stats ms ON m.id = ms.meme_id
+		WHERE m.market_id = $1
+	`, marketID).Scan(&totalViews, &totalUnique, &totalReposts, &totalDerivatives)
+	if err != nil {
+		http.Error(w, "DB error", 500)
+		return
+	}
+
+	avgRepostRatio := 0.0
+	marketVirality := 0.0
+	if totalViews > 0 {
+		avgRepostRatio = float64(totalReposts) / float64(totalViews)
+		marketVirality = (float64(totalReposts)*3 + float64(totalDerivatives)*10) / (float64(totalViews) + 1)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"market_id":          marketID,
+		"total_views":        totalViews,
+		"total_unique_views": totalUnique,
+		"total_reposts":      totalReposts,
+		"total_derivatives":  totalDerivatives,
+		"avg_repost_ratio":   avgRepostRatio,
+		"market_virality":    marketVirality,
 	})
 }
 
@@ -459,6 +501,8 @@ func memesSubroutes(w http.ResponseWriter, r *http.Request) {
 		getMemeStats(w, r)
 	} else if strings.HasSuffix(path, "/events") {
 		getMemeEvents(w, r)
+	} else if strings.HasSuffix(path, "/signals") {
+		getMemeSignals(w, r)
 	} else {
 		http.NotFound(w, r)
 	}
@@ -486,6 +530,46 @@ func getMemeStats(w http.ResponseWriter, r *http.Request) {
 		"unique_views": uniqueViews,
 		"reposts":      reposts,
 		"derivatives":  derivatives,
+	})
+}
+
+func getMemeSignals(w http.ResponseWriter, r *http.Request) {
+	idStr := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/memes/"), "/signals")
+	memeID, err := strconv.Atoi(idStr)
+	if err != nil {
+		http.Error(w, "invalid meme id", 400)
+		return
+	}
+
+	var views, uniqueViews, reposts, derivatives int
+	err = db.DB.QueryRow(`
+		SELECT COALESCE(views,0), COALESCE(unique_views,0), COALESCE(reposts,0), COALESCE(derivatives,0)
+		FROM meme_attention_stats WHERE meme_id = $1
+	`, memeID).Scan(&views, &uniqueViews, &reposts, &derivatives)
+	if err != nil && err != sql.ErrNoRows {
+		http.Error(w, "DB error", 500)
+		return
+	}
+
+	repostRatio := 0.0
+	derivativeRatio := 0.0
+	viralityScore := 0.0
+	if views > 0 {
+		repostRatio = float64(reposts) / float64(views)
+		derivativeRatio = float64(derivatives) / float64(views)
+		viralityScore = (float64(reposts)*3 + float64(derivatives)*10) / (float64(views) + 1)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"meme_id":          memeID,
+		"views":            views,
+		"unique_views":     uniqueViews,
+		"reposts":          reposts,
+		"derivatives":      derivatives,
+		"repost_ratio":     repostRatio,
+		"derivative_ratio": derivativeRatio,
+		"virality_score":   viralityScore,
 	})
 }
 
