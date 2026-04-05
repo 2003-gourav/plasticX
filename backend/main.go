@@ -835,6 +835,8 @@ func memesSubroutes(w http.ResponseWriter, r *http.Request) {
 		getMemeEvents(w, r)
 	} else if strings.HasSuffix(path, "/signals") {
 		getMemeSignals(w, r)
+	} else if strings.HasSuffix(path, "/score") {
+		getMemeScore(w, r)
 	} else if strings.HasSuffix(path, "/insights") {
 		getMemeInsights(w, r)
 	} else if strings.HasSuffix(path, "/attention") {
@@ -917,6 +919,74 @@ func getMemeSignals(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(signal)
+}
+
+// getMemeScore returns attention_score (as raw_score) and a 0–100 normalization vs min/max across meme_signals.
+func getMemeScore(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	idStr := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/memes/"), "/score")
+	memeID, err := strconv.Atoi(idStr)
+	if err != nil {
+		http.Error(w, "invalid meme id", 400)
+		return
+	}
+
+	var exists bool
+	if err := db.DB.QueryRow(`SELECT EXISTS(SELECT 1 FROM memes WHERE id = $1)`, memeID).Scan(&exists); err != nil {
+		http.Error(w, "DB error", 500)
+		return
+	}
+	if !exists {
+		http.Error(w, "meme not found", 404)
+		return
+	}
+
+	var attentionScore, momentum float64
+	err = db.DB.QueryRow(`
+		SELECT COALESCE(attention_score, 0), COALESCE(momentum, 0)
+		FROM meme_signals WHERE meme_id = $1
+	`, memeID).Scan(&attentionScore, &momentum)
+	if err != nil && err != sql.ErrNoRows {
+		http.Error(w, "DB error", 500)
+		return
+	}
+	if err == sql.ErrNoRows {
+		attentionScore, momentum = 0, 0
+	}
+
+	var minScore, maxScore float64
+	err = db.DB.QueryRow(`
+		SELECT COALESCE(MIN(attention_score), -100000::double precision),
+		       COALESCE(MAX(attention_score), 100000::double precision)
+		FROM meme_signals
+		WHERE attention_score != 0
+	`).Scan(&minScore, &maxScore)
+	if err != nil {
+		http.Error(w, "DB error", 500)
+		return
+	}
+
+	normalizedScore := 50.0
+	if maxScore > minScore {
+		normalizedScore = ((attentionScore - minScore) / (maxScore - minScore)) * 100
+		if normalizedScore < 0 {
+			normalizedScore = 0
+		}
+		if normalizedScore > 100 {
+			normalizedScore = 100
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"meme_id":            memeID,
+		"raw_score":          attentionScore,
+		"normalized_score":   normalizedScore,
+		"momentum":           momentum,
+	})
 }
 
 // getMemeInsights returns lifetime stats from meme_attention_stats plus ratio-style scores (weights: view 1, repost 3, derivative 5).
