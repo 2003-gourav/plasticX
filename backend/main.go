@@ -153,11 +153,28 @@ func createMarket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		http.Error(w, "name is required", 400)
+		return
+	}
+
+	var exists bool
+	err := db.DB.QueryRow(`SELECT EXISTS(SELECT 1 FROM markets WHERE name = $1)`, name).Scan(&exists)
+	if err != nil {
+		http.Error(w, "DB error", 500)
+		return
+	}
+	if exists {
+		http.Error(w, "market with this name already exist", http.StatusConflict)
+		return
+	}
+
 	var id int
-	err := db.DB.QueryRow(`
+	err = db.DB.QueryRow(`
 		INSERT INTO markets (name, x_reserve, y_reserve, fee, treasury)
 		VALUES ($1, $2, $3, $4, 0) RETURNING id
-	`, req.Name, req.XReserve, req.YReserve, req.Fee).Scan(&id)
+	`, name, req.XReserve, req.YReserve, req.Fee).Scan(&id)
 	if err != nil {
 		http.Error(w, "DB error", 500)
 		return
@@ -180,6 +197,8 @@ func marketsSubroutes(w http.ResponseWriter, r *http.Request) {
 		getMarketStats(w, r)
 	case strings.HasSuffix(path, "/signals"):
 		getMarketSignals(w, r)
+	case strings.HasSuffix(path, "/insights"):
+		getMarketInsights(w, r)
 	case strings.HasSuffix(path, "/trending"):
 		getMarketTrending(w, r)
 	default:
@@ -248,6 +267,52 @@ func getMarketSignals(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var exists bool
+	if err := db.DB.QueryRow(`SELECT EXISTS(SELECT 1 FROM markets WHERE id = $1)`, marketID).Scan(&exists); err != nil {
+		http.Error(w, "DB error", 500)
+		return
+	}
+	if !exists {
+		http.Error(w, "market not found", 404)
+		return
+	}
+
+	var ms models.MarketSignal
+	err = db.DB.QueryRow(`
+		SELECT market_id, total_attention_score, total_views_1h, market_velocity, market_momentum, updated_at
+		FROM market_signals WHERE market_id = $1
+	`, marketID).Scan(&ms.MarketID, &ms.TotalAttentionScore, &ms.TotalViews1h,
+		&ms.MarketVelocity, &ms.MarketMomentum, &ms.UpdatedAt)
+	if err == sql.ErrNoRows {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"market_id":             marketID,
+			"total_attention_score": 0.0,
+			"total_views_1h":        0,
+			"market_velocity":       0.0,
+			"market_momentum":       0.0,
+			"updated_at":            nil,
+		})
+		return
+	}
+	if err != nil {
+		http.Error(w, "DB error", 500)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(ms)
+}
+
+// getMarketInsights returns lifetime aggregates from meme_attention_stats plus ratio-style scores (not materialized signals).
+func getMarketInsights(w http.ResponseWriter, r *http.Request) {
+	idStr := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/markets/"), "/insights")
+	marketID, err := strconv.Atoi(idStr)
+	if err != nil {
+		http.Error(w, "invalid market id", 400)
+		return
+	}
+
 	var totalViews, totalUnique, totalReposts, totalDerivatives int
 	err = db.DB.QueryRow(`
 		SELECT COALESCE(SUM(ms.views),0), COALESCE(SUM(ms.unique_views),0),
@@ -262,10 +327,12 @@ func getMarketSignals(w http.ResponseWriter, r *http.Request) {
 	}
 
 	avgRepostRatio := 0.0
-	marketVirality := 0.0
+	derivativeRatio := 0.0
+	viralityScore := 0.0
 	if totalViews > 0 {
 		avgRepostRatio = float64(totalReposts) / float64(totalViews)
-		marketVirality = (float64(totalReposts)*3 + float64(totalDerivatives)*10) / (float64(totalViews) + 1)
+		derivativeRatio = float64(totalDerivatives) / float64(totalViews)
+		viralityScore = (float64(totalReposts)*models.AttentionWeightRepost + float64(totalDerivatives)*models.AttentionWeightDerivative) / (float64(totalViews) + 1)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -276,7 +343,8 @@ func getMarketSignals(w http.ResponseWriter, r *http.Request) {
 		"total_reposts":      totalReposts,
 		"total_derivatives":  totalDerivatives,
 		"avg_repost_ratio":   avgRepostRatio,
-		"market_virality":    marketVirality,
+		"derivative_ratio":   derivativeRatio,
+		"virality_score":     viralityScore,
 	})
 }
 
@@ -586,6 +654,8 @@ func memesSubroutes(w http.ResponseWriter, r *http.Request) {
 		getMemeEvents(w, r)
 	} else if strings.HasSuffix(path, "/signals") {
 		getMemeSignals(w, r)
+	} else if strings.HasSuffix(path, "/insights") {
+		getMemeInsights(w, r)
 	} else if strings.HasSuffix(path, "/attention") {
 		getMemeAttentionWindow(w, r)
 	} else if strings.HasSuffix(path, "/velocity") {
@@ -628,6 +698,56 @@ func getMemeSignals(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var exists bool
+	if err := db.DB.QueryRow(`SELECT EXISTS(SELECT 1 FROM memes WHERE id = $1)`, memeID).Scan(&exists); err != nil {
+		http.Error(w, "DB error", 500)
+		return
+	}
+	if !exists {
+		http.Error(w, "meme not found", 404)
+		return
+	}
+
+	var ms models.MemeSignal
+	err = db.DB.QueryRow(`
+		SELECT meme_id, views_1h, views_24h, reposts_1h, derivatives_1h,
+		       velocity_1h, momentum, attention_score, updated_at
+		FROM meme_signals WHERE meme_id = $1
+	`, memeID).Scan(&ms.MemeID, &ms.Views1h, &ms.Views24h, &ms.Reposts1h, &ms.Derivatives1h,
+		&ms.Velocity1h, &ms.Momentum, &ms.AttentionScore, &ms.UpdatedAt)
+	if err == sql.ErrNoRows {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"meme_id":          memeID,
+			"views_1h":         0,
+			"views_24h":        0,
+			"reposts_1h":       0,
+			"derivatives_1h":   0,
+			"velocity_1h":      0.0,
+			"momentum":         0.0,
+			"attention_score":  0.0,
+			"updated_at":       nil,
+		})
+		return
+	}
+	if err != nil {
+		http.Error(w, "DB error", 500)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(ms)
+}
+
+// getMemeInsights returns lifetime stats from meme_attention_stats plus ratio-style scores (weights: view 1, repost 3, derivative 5).
+func getMemeInsights(w http.ResponseWriter, r *http.Request) {
+	idStr := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/memes/"), "/insights")
+	memeID, err := strconv.Atoi(idStr)
+	if err != nil {
+		http.Error(w, "invalid meme id", 400)
+		return
+	}
+
 	var views, uniqueViews, reposts, derivatives int
 	err = db.DB.QueryRow(`
 		SELECT COALESCE(views,0), COALESCE(unique_views,0), COALESCE(reposts,0), COALESCE(derivatives,0)
@@ -644,7 +764,7 @@ func getMemeSignals(w http.ResponseWriter, r *http.Request) {
 	if views > 0 {
 		repostRatio = float64(reposts) / float64(views)
 		derivativeRatio = float64(derivatives) / float64(views)
-		viralityScore = (float64(reposts)*3 + float64(derivatives)*10) / (float64(views) + 1)
+		viralityScore = (float64(reposts)*models.AttentionWeightRepost + float64(derivatives)*models.AttentionWeightDerivative) / (float64(views) + 1)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
