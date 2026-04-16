@@ -548,20 +548,6 @@ func getTopMemes(w http.ResponseWriter, r *http.Request) {
     }
     sortColumn := validSorts[sortBy]
 
-    window := r.URL.Query().Get("window")
-    var viewsField string
-    switch window {
-    case "24h":
-        viewsField = "views_24h"
-    case "7d":
-        viewsField = "views_7d" // you may need to add this column
-    case "all":
-        viewsField = "views_all" // you may need to add this column
-    default:
-        window = "1h"
-        viewsField = "views_1h"
-    }
-
     limit := 20
     if l := r.URL.Query().Get("limit"); l != "" {
         if parsed, _ := strconv.Atoi(l); parsed > 0 && parsed <= 100 {
