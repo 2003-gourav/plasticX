@@ -1339,19 +1339,50 @@ func recordAttentionEvent(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "recorded"})
 }
 func getTrendingMarkets(w http.ResponseWriter, r *http.Request) {
+    // Parse sort parameter
     sortBy := r.URL.Query().Get("sort")
-    if sortBy != "market_velocity" && sortBy != "market_momentum" {
-        sortBy = "total_attention_score"
+    validSorts := map[string]string{
+        "total_attention_score": "ms.total_attention_score",
+        "market_velocity":       "ms.market_velocity",
+        "market_momentum":       "ms.market_momentum",
+        "total_views":           "ms.total_views_1h",
     }
+    if _, ok := validSorts[sortBy]; !ok {
+        sortBy = "market_momentum"
+    }
+    sortColumn := validSorts[sortBy]
 
-    limit := 10
+    // Pagination
+    limit := 20
     if l := r.URL.Query().Get("limit"); l != "" {
-        if parsed, _ := strconv.Atoi(l); parsed > 0 && parsed <= 50 {
+        if parsed, _ := strconv.Atoi(l); parsed > 0 && parsed <= 100 {
             limit = parsed
         }
     }
+    offset := 0
+    if o := r.URL.Query().Get("offset"); o != "" {
+        if parsed, _ := strconv.Atoi(o); parsed >= 0 {
+            offset = parsed
+        }
+    }
 
-    query := fmt.Sprintf(`
+    // Filters
+    minMomentum := -1000.0
+    if mm := r.URL.Query().Get("min_momentum"); mm != "" {
+        if parsed, _ := strconv.ParseFloat(mm, 64); parsed != 0 {
+            minMomentum = parsed
+        }
+    }
+    minMemes := 1
+    if mm := r.URL.Query().Get("min_memes"); mm != "" {
+        if parsed, _ := strconv.Atoi(mm); parsed >= 0 {
+            minMemes = parsed
+        }
+    }
+    search := r.URL.Query().Get("q")
+
+    // Build query with proper WHERE clause
+    query := `
         SELECT 
             ms.market_id, 
             m.name,
@@ -1363,17 +1394,54 @@ func getTrendingMarkets(w http.ResponseWriter, r *http.Request) {
         FROM market_signals ms
         JOIN markets m ON ms.market_id = m.id
         LEFT JOIN memes me ON m.id = me.market_id
-        GROUP BY ms.market_id, m.name, ms.total_attention_score, ms.total_views_1h, ms.market_velocity, ms.market_momentum
-        ORDER BY ms.%s DESC
-        LIMIT $1
-    `, sortBy)
+        WHERE ms.market_momentum >= $1
+    `
+    args := []interface{}{minMomentum}
 
-    rows, err := db.DB.Query(query, limit)
+    // Add search filter if provided
+    if search != "" {
+        query += " AND m.name ILIKE $" + strconv.Itoa(len(args)+1)
+        args = append(args, "%"+search+"%")
+    }
+
+    // GROUP BY and HAVING
+    query += `
+        GROUP BY ms.market_id, m.name, ms.total_attention_score, ms.total_views_1h, ms.market_velocity, ms.market_momentum
+        HAVING COUNT(DISTINCT me.id) >= $` + strconv.Itoa(len(args)+1)
+    args = append(args, minMemes)
+
+    // ORDER BY with proper parameter numbering
+    query += fmt.Sprintf(" ORDER BY %s DESC LIMIT $%d OFFSET $%d", sortColumn, len(args)+1, len(args)+2)
+    args = append(args, limit, offset)
+
+    rows, err := db.DB.Query(query, args...)
     if err != nil {
+        log.Printf("Trending markets query error: %v", err)
         http.Error(w, "DB error", 500)
         return
     }
     defer rows.Close()
+
+    // Get total count for pagination
+    var total int
+    countQuery := `
+        SELECT COUNT(DISTINCT ms.market_id)
+        FROM market_signals ms
+        JOIN markets m ON ms.market_id = m.id
+        LEFT JOIN memes me ON m.id = me.market_id
+        WHERE ms.market_momentum >= $1
+    `
+    countArgs := []interface{}{minMomentum}
+    
+    if search != "" {
+        countQuery += " AND m.name ILIKE $2"
+        countArgs = append(countArgs, "%"+search+"%")
+    }
+    
+    countQuery += ` GROUP BY ms.market_id HAVING COUNT(DISTINCT me.id) >= $` + strconv.Itoa(len(countArgs)+1)
+    countArgs = append(countArgs, minMemes)
+    
+    db.DB.QueryRow(countQuery, countArgs...).Scan(&total)
 
     var result []map[string]interface{}
     for rows.Next() {
@@ -1381,23 +1449,31 @@ func getTrendingMarkets(w http.ResponseWriter, r *http.Request) {
         var name string
         var totalScore, marketVelocity, marketMomentum float64
         var totalViews, memeCount int
-		if err := rows.Scan(&marketID, &name, &totalScore, &totalViews, &marketVelocity, &marketMomentum, &memeCount); err != nil {
-    		http.Error(w, "Scan error", 500)
-    		return
-		}
+        
+        if err := rows.Scan(&marketID, &name, &totalScore, &totalViews, &marketVelocity, &marketMomentum, &memeCount); err != nil {
+            log.Printf("Scan error: %v", err)
+            http.Error(w, "Scan error", 500)
+            return
+        }
+
         result = append(result, map[string]interface{}{
-            "market_id":              marketID,
-            "name":                   name,
-            "total_attention_score":  totalScore,
-            "total_views_1h":         totalViews,
-            "market_velocity":        marketVelocity,
-            "market_momentum":        marketMomentum,
-            "meme_count":             memeCount,
+            "market_id":             marketID,
+            "name":                  name,
+            "total_attention_score": totalScore,
+            "total_views_1h":        totalViews,
+            "market_velocity":       marketVelocity,
+            "market_momentum":       marketMomentum,
+            "meme_count":            memeCount,
         })
     }
 
     w.Header().Set("Content-Type", "application/json")
-    json.NewEncoder(w).Encode(result)
+    json.NewEncoder(w).Encode(map[string]interface{}{
+        "data":   result,
+        "total":  total,
+        "offset": offset,
+        "limit":  limit,
+    })
 }
 func getMarketAttentionDetail(w http.ResponseWriter, r *http.Request) {
     idStr := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/markets/"), "/attention-detail")
