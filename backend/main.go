@@ -94,6 +94,25 @@ func main() {
 
 	log.Println("Server running on :8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
+
+	http.HandleFunc("/trending-markets", getTrendingMarkets)
+http.HandleFunc("/markets/", func(w http.ResponseWriter, r *http.Request) {
+    if strings.HasSuffix(r.URL.Path, "/attention-detail") {
+        getMarketAttentionDetail(w, r)
+    } else if strings.HasSuffix(r.URL.Path, "/signals") {
+        getMarketSignals(w, r)
+    } else if strings.HasSuffix(r.URL.Path, "/price") {
+        getPrice(w, r)
+    } else if strings.HasSuffix(r.URL.Path, "/attention") {
+        getMarketAttention(w, r)
+    } else if strings.HasSuffix(r.URL.Path, "/top-memes") {
+        getTopMemes(w, r)
+    } else if strings.HasSuffix(r.URL.Path, "/stats") {
+        getMarketStats(w, r)
+    } else {
+        http.NotFound(w, r)
+    }
+})
 }
 
 func refreshMemeSignals() {
@@ -1295,4 +1314,70 @@ func getTrendingMarkets(w http.ResponseWriter, r *http.Request) {
 
     w.Header().Set("Content-Type", "application/json")
     json.NewEncoder(w).Encode(result)
+}
+func getMarketAttentionDetail(w http.ResponseWriter, r *http.Request) {
+    idStr := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/markets/"), "/attention-detail")
+    marketID, err := strconv.Atoi(idStr)
+    if err != nil {
+        http.Error(w, "invalid market id", 400)
+        return
+    }
+
+    // Get market summary
+    var summary struct {
+        TotalAttentionScore float64
+        TotalViews1h        int
+        MarketVelocity      float64
+        MarketMomentum      float64
+    }
+    err = db.DB.QueryRow(`
+        SELECT total_attention_score, total_views_1h, market_velocity, market_momentum
+        FROM market_signals WHERE market_id = $1
+    `, marketID).Scan(&summary.TotalAttentionScore, &summary.TotalViews1h, &summary.MarketVelocity, &summary.MarketMomentum)
+    if err != nil && err != sql.ErrNoRows {
+        http.Error(w, "DB error", 500)
+        return
+    }
+
+    // Get top memes in this market
+    rows, err := db.DB.Query(`
+        SELECT m.id, m.caption, ms.attention_score, ms.velocity_1h, ms.momentum
+        FROM memes m
+        JOIN meme_signals ms ON m.id = ms.meme_id
+        WHERE m.market_id = $1 AND ms.attention_score > 0
+        ORDER BY ms.attention_score DESC
+        LIMIT 10
+    `, marketID)
+    if err != nil {
+        http.Error(w, "DB error", 500)
+        return
+    }
+    defer rows.Close()
+
+    var topMemes []map[string]interface{}
+    for rows.Next() {
+        var id int
+        var caption string
+        var score, velocity, momentum float64
+        rows.Scan(&id, &caption, &score, &velocity, &momentum)
+        topMemes = append(topMemes, map[string]interface{}{
+            "meme_id":    id,
+            "caption":    caption,
+            "score":      score,
+            "velocity":   velocity,
+            "momentum":   momentum,
+        })
+    }
+
+    // Get market name
+    var marketName string
+    db.DB.QueryRow("SELECT name FROM markets WHERE id = $1", marketID).Scan(&marketName)
+
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(map[string]interface{}{
+        "market_id": marketID,
+        "name":      marketName,
+        "summary":   summary,
+        "top_memes": topMemes,
+    })
 }
