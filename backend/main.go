@@ -92,26 +92,6 @@ func main() {
 		}
 	}()
 
-	
-
-	http.HandleFunc("/trending-markets", getTrendingMarkets)
-	http.HandleFunc("/markets/", func(w http.ResponseWriter, r *http.Request) {
-    	if strings.HasSuffix(r.URL.Path, "/attention-detail") {
-        	getMarketAttentionDetail(w, r)
-    	} else if strings.HasSuffix(r.URL.Path, "/signals") {
-        	getMarketSignals(w, r)
-    	} else if strings.HasSuffix(r.URL.Path, "/price") {
-        	getPrice(w, r)
-    	} else if strings.HasSuffix(r.URL.Path, "/attention") {
-        	getMarketAttention(w, r)
-    	} else if strings.HasSuffix(r.URL.Path, "/top-memes") {
-        	getTopMemes(w, r)
-    	} else if strings.HasSuffix(r.URL.Path, "/stats") {
-        	getMarketStats(w, r)
-    	} else {
-        	http.NotFound(w, r)
-    	}
-	})
 	log.Println("Server running on :8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
