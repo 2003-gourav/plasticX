@@ -83,6 +83,7 @@ func main() {
 	http.HandleFunc("/attention/event", recordAttentionEvent) // Week 2 event endpoint
 
 	http.HandleFunc("/top-memes", getTopMemesByVelocity)
+	http.HandleFunc("/trending-markets", getTrendingMarkets)
 
 	go func() {
 		for {
@@ -370,6 +371,8 @@ func marketsSubroutes(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case strings.HasSuffix(path, "/price"):
 		getPrice(w, r)
+	case strings.HasSuffix(path, "/attention-detail"):
+    	getMarketAttentionDetail(w, r)
 	case strings.HasSuffix(path, "/attention"):
 		getMarketAttention(w, r)
 	case strings.HasSuffix(path, "/top-memes"):
@@ -1282,6 +1285,10 @@ func getTrendingMarkets(w http.ResponseWriter, r *http.Request) {
         var totalScore, marketVelocity, marketMomentum float64
         var totalViews, memeCount int
         rows.Scan(&marketID, &name, &totalScore, &totalViews, &marketVelocity, &marketMomentum, &memeCount)
+		if err := rows.Scan(&marketID, &name, &totalScore, &totalViews, &marketVelocity, &marketMomentum, &memeCount); err != nil {
+    		http.Error(w, "Scan error", 500)
+    		return
+		}
         result = append(result, map[string]interface{}{
             "market_id":              marketID,
             "name":                   name,
