@@ -1284,7 +1284,6 @@ func getTrendingMarkets(w http.ResponseWriter, r *http.Request) {
         var name string
         var totalScore, marketVelocity, marketMomentum float64
         var totalViews, memeCount int
-        rows.Scan(&marketID, &name, &totalScore, &totalViews, &marketVelocity, &marketMomentum, &memeCount)
 		if err := rows.Scan(&marketID, &name, &totalScore, &totalViews, &marketVelocity, &marketMomentum, &memeCount); err != nil {
     		http.Error(w, "Scan error", 500)
     		return
