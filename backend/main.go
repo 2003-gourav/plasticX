@@ -649,9 +649,12 @@ func getTopMemes(w http.ResponseWriter, r *http.Request) {
         var velocity, momentum, attentionScore float64
         var createdAt time.Time
 
-        rows.Scan(&id, &caption, &imageURL, &marketID, &marketName,
-            &views1h, &views24h, &reposts, &derivatives,
-            &velocity, &momentum, &attentionScore, &createdAt)
+        if err := rows.Scan(&id, &caption, &imageURL, &marketID, &marketName,
+    		&views1h, &views24h, &reposts, &derivatives,
+    		&velocity, &momentum, &attentionScore, &createdAt); err != nil {
+    		http.Error(w, "Scan error", 500)
+    		return
+		}
 
         result = append(result, map[string]interface{}{
             "meme_id":          id,
