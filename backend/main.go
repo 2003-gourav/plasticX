@@ -1238,3 +1238,61 @@ func recordAttentionEvent(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]string{"status": "recorded"})
 }
+func getTrendingMarkets(w http.ResponseWriter, r *http.Request) {
+    sortBy := r.URL.Query().Get("sort")
+    if sortBy != "market_velocity" && sortBy != "market_momentum" {
+        sortBy = "total_attention_score"
+    }
+
+    limit := 10
+    if l := r.URL.Query().Get("limit"); l != "" {
+        if parsed, _ := strconv.Atoi(l); parsed > 0 && parsed <= 50 {
+            limit = parsed
+        }
+    }
+
+    query := fmt.Sprintf(`
+        SELECT 
+            ms.market_id, 
+            m.name,
+            ms.total_attention_score,
+            ms.total_views_1h,
+            ms.market_velocity,
+            ms.market_momentum,
+            COUNT(DISTINCT me.id) as meme_count
+        FROM market_signals ms
+        JOIN markets m ON ms.market_id = m.id
+        LEFT JOIN memes me ON m.id = me.market_id
+        GROUP BY ms.market_id, m.name, ms.total_attention_score, ms.total_views_1h, ms.market_velocity, ms.market_momentum
+        ORDER BY ms.%s DESC
+        LIMIT $1
+    `, sortBy)
+
+    rows, err := db.DB.Query(query, limit)
+    if err != nil {
+        http.Error(w, "DB error", 500)
+        return
+    }
+    defer rows.Close()
+
+    var result []map[string]interface{}
+    for rows.Next() {
+        var marketID int
+        var name string
+        var totalScore, marketVelocity, marketMomentum float64
+        var totalViews, memeCount int
+        rows.Scan(&marketID, &name, &totalScore, &totalViews, &marketVelocity, &marketMomentum, &memeCount)
+        result = append(result, map[string]interface{}{
+            "market_id":              marketID,
+            "name":                   name,
+            "total_attention_score":  totalScore,
+            "total_views_1h":         totalViews,
+            "market_velocity":        marketVelocity,
+            "market_momentum":        marketMomentum,
+            "meme_count":             memeCount,
+        })
+    }
+
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(result)
+}
