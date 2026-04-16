@@ -533,42 +533,150 @@ func getMarketInsights(w http.ResponseWriter, r *http.Request) {
 }
 
 func getTopMemes(w http.ResponseWriter, r *http.Request) {
-	idStr := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/markets/"), "/top-memes")
-	marketID, err := strconv.Atoi(idStr)
-	if err != nil {
-		http.Error(w, "invalid market id", 400)
-		return
-	}
-	sortBy := r.URL.Query().Get("sort")
-	allowed := map[string]bool{"views": true, "unique_views": true, "reposts": true, "derivatives": true}
-	if !allowed[sortBy] {
-		sortBy = "reposts"
-	}
-	query := fmt.Sprintf(`
-		SELECT m.id, m.caption, COALESCE(ms.%s, 0) as val
-		FROM memes m
-		LEFT JOIN meme_attention_stats ms ON m.id = ms.meme_id
-		WHERE m.market_id = $1
-		ORDER BY val DESC
-		LIMIT 10
-	`, sortBy)
-	rows, err := db.DB.Query(query, marketID)
-	if err != nil {
-		http.Error(w, "DB error", 500)
-		return
-	}
-	defer rows.Close()
-	var result []map[string]interface{}
-	for rows.Next() {
-		var id int
-		var caption string
-		var val int
-		rows.Scan(&id, &caption, &val)
-		result = append(result, map[string]interface{}{
-			"id": id, "caption": caption, sortBy: val,
-		})
-	}
-	json.NewEncoder(w).Encode(result)
+    // Parse parameters
+    sortBy := r.URL.Query().Get("sort")
+    validSorts := map[string]string{
+        "momentum":        "ms.momentum",
+        "attention_score": "ms.attention_score",
+        "views":           "ms.views_1h",
+        "reposts":         "ms.reposts_1h",
+        "derivatives":     "ms.derivatives_1h",
+        "newest":          "m.created_at",
+    }
+    if _, ok := validSorts[sortBy]; !ok {
+        sortBy = "momentum"
+    }
+    sortColumn := validSorts[sortBy]
+
+    window := r.URL.Query().Get("window")
+    var viewsField string
+    switch window {
+    case "24h":
+        viewsField = "views_24h"
+    case "7d":
+        viewsField = "views_7d" // you may need to add this column
+    case "all":
+        viewsField = "views_all" // you may need to add this column
+    default:
+        window = "1h"
+        viewsField = "views_1h"
+    }
+
+    limit := 20
+    if l := r.URL.Query().Get("limit"); l != "" {
+        if parsed, _ := strconv.Atoi(l); parsed > 0 && parsed <= 100 {
+            limit = parsed
+        }
+    }
+
+    offset := 0
+    if o := r.URL.Query().Get("offset"); o != "" {
+        if parsed, _ := strconv.Atoi(o); parsed >= 0 {
+            offset = parsed
+        }
+    }
+
+    maxPerMarket := 3
+    if m := r.URL.Query().Get("max_per_market"); m != "" {
+        if parsed, _ := strconv.Atoi(m); parsed >= 1 && parsed <= 10 {
+            maxPerMarket = parsed
+        }
+    }
+
+    minMomentum := 0.0
+    if mm := r.URL.Query().Get("min_momentum"); mm != "" {
+        if parsed, _ := strconv.ParseFloat(mm, 64); parsed != 0 {
+            minMomentum = parsed
+        }
+    }
+
+    // Build query with market deduplication using row_number()
+    query := fmt.Sprintf(`
+        WITH ranked_memes AS (
+            SELECT 
+                m.id,
+                m.caption,
+                m.image_url,
+                m.market_id,
+                mk.name as market_name,
+                ms.views_1h,
+                ms.views_24h,
+                ms.reposts_1h,
+                ms.derivatives_1h,
+                ms.velocity_1h,
+                ms.momentum,
+                ms.attention_score,
+                m.created_at,
+                ROW_NUMBER() OVER (PARTITION BY m.market_id ORDER BY %s DESC) as market_rank
+            FROM memes m
+            JOIN meme_signals ms ON m.id = ms.meme_id
+            JOIN markets mk ON m.market_id = mk.id
+            WHERE ms.momentum >= $1
+        )
+        SELECT 
+            id, caption, image_url, market_id, market_name,
+            views_1h, views_24h, reposts_1h, derivatives_1h,
+            velocity_1h, momentum, attention_score, created_at
+        FROM ranked_memes
+        WHERE market_rank <= $2
+        ORDER BY %s DESC
+        LIMIT $3 OFFSET $4
+    `, sortColumn, sortColumn)
+
+    rows, err := db.DB.Query(query, minMomentum, maxPerMarket, limit, offset)
+    if err != nil {
+        log.Printf("Top memes query error: %v", err)
+        http.Error(w, "DB error", 500)
+        return
+    }
+    defer rows.Close()
+
+    // Get total count for pagination
+    var total int
+    countQuery := `
+        SELECT COUNT(DISTINCT m.id)
+        FROM memes m
+        JOIN meme_signals ms ON m.id = ms.meme_id
+        WHERE ms.momentum >= $1
+    `
+    db.DB.QueryRow(countQuery, minMomentum).Scan(&total)
+
+    var result []map[string]interface{}
+    for rows.Next() {
+        var id, marketID int
+        var caption, imageURL, marketName string
+        var views1h, views24h, reposts, derivatives int
+        var velocity, momentum, attentionScore float64
+        var createdAt time.Time
+
+        rows.Scan(&id, &caption, &imageURL, &marketID, &marketName,
+            &views1h, &views24h, &reposts, &derivatives,
+            &velocity, &momentum, &attentionScore, &createdAt)
+
+        result = append(result, map[string]interface{}{
+            "meme_id":          id,
+            "caption":          caption,
+            "image_url":        imageURL,
+            "market_id":        marketID,
+            "market_name":      marketName,
+            "views_1h":         views1h,
+            "views_24h":        views24h,
+            "reposts_1h":       reposts,
+            "derivatives_1h":   derivatives,
+            "velocity_1h":      velocity,
+            "momentum":         momentum,
+            "attention_score":  attentionScore,
+            "created_at":       createdAt,
+        })
+    }
+
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(map[string]interface{}{
+        "data":   result,
+        "total":  total,
+        "offset": offset,
+        "limit":  limit,
+    })
 }
 
 func getMarketTrending(w http.ResponseWriter, r *http.Request) {
